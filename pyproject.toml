@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hivemake-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python client SDK for the HiveMake.ai REST API"
 requires-python = ">=3.12"
 license = {text = "O'Saasy License"}
 dependencies = [
-    "hivemake-models @ git+https://{env:CR_PAT}@github.com/Really-Bad-Apps/hivemake-models.git",
+    "hivemake-models @ git+https://github.com/Really-Bad-Apps/hivemake-models.git",
     "requests",
 ]
 

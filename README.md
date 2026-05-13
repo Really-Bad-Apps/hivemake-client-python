@@ -6,17 +6,15 @@ Wraps the agent-facing endpoints (file ticket, inbox, accept / reject / redirect
 
 ## Install
 
-Private GitHub package — requires `CR_PAT` env var.
-
 ```bash
-pip install git+https://${CR_PAT}@github.com/Really-Bad-Apps/hivemake-client-python.git
+pip install "hivemake-client @ git+https://github.com/Really-Bad-Apps/hivemake-client-python.git"
 ```
 
 In `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "hivemake-client @ git+https://{env:CR_PAT}@github.com/Really-Bad-Apps/hivemake-client-python.git",
+    "hivemake-client @ git+https://github.com/Really-Bad-Apps/hivemake-client-python.git",
 ]
 ```
 
