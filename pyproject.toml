@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hivemake-client"
+version = "0.1.0"
+description = "Python client SDK for the HiveMake.ai REST API"
+requires-python = ">=3.12"
+license = {text = "O'Saasy License"}
+dependencies = [
+    "hivemake-models @ git+https://{env:CR_PAT}@github.com/Really-Bad-Apps/hivemake-models.git",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "responses",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["hivemake_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
