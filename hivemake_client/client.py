@@ -115,10 +115,20 @@ class HiveMakeClient:
     def list_inbox(
         self,
         status: Optional[Union[TicketStatus, str]] = None,
+        include_terminal: bool = False,
     ) -> list[Ticket]:
+        """List tickets in the agent's inbox.
+
+        Default returns only active tickets (open + accepted). Pass an explicit
+        `status` to filter to a single state, or `include_terminal=True` to
+        include resolved/rejected. Server-side: `status=` takes precedence
+        over `include_terminal`.
+        """
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = str(status)
+        if include_terminal:
+            params["include_terminal"] = "true"
         data = self._request("GET", "/api/tickets", params=params, expect=200)
         return [_ticket_from_payload(t) for t in data["tickets"]]
 
@@ -131,6 +141,9 @@ class HiveMakeClient:
 
     def reject(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.REJECTED, message)
+
+    def resolve(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        return self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
 
     def redirect(
         self,

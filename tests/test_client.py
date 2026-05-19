@@ -210,6 +210,21 @@ class TestListInbox:
         assert responses.calls[0].request.url.endswith("?status=accepted")
 
     @responses.activate
+    def test_include_terminal_flag_passed_as_query_param(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets", json={"tickets": []}, status=200)
+        client.list_inbox(include_terminal=True)
+        assert "include_terminal=true" in responses.calls[0].request.url
+
+    @responses.activate
+    def test_status_and_include_terminal_both_sent(self, client) -> None:
+        """Server-side precedence handles the conflict; client just forwards both."""
+        responses.get(f"{BASE}/api/tickets", json={"tickets": []}, status=200)
+        client.list_inbox(status="open", include_terminal=True)
+        url = responses.calls[0].request.url
+        assert "status=open" in url
+        assert "include_terminal=true" in url
+
+    @responses.activate
     def test_invalid_status_raises(self, client) -> None:
         responses.get(
             f"{BASE}/api/tickets",
@@ -257,6 +272,23 @@ class TestActions:
         ticket = client.reject(tid)
         assert ticket.id == tid
         assert b'"action": "rejected"' in responses.calls[0].request.body
+
+    @responses.activate
+    def test_resolve(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="resolved"),
+                "negotiation": {"id": str(uuid4()), "action": "resolved"},
+            },
+            status=201,
+        )
+        ticket = client.resolve(tid, message="shipped")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "resolved"' in body
+        assert b'"message": "shipped"' in body
 
     @responses.activate
     def test_redirect(self, client) -> None:
