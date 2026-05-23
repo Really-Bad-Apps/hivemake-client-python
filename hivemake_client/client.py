@@ -132,6 +132,25 @@ class HiveMakeClient:
         data = self._request("GET", "/api/tickets", params=params, expect=200)
         return [_ticket_from_payload(t) for t in data["tickets"]]
 
+    def list_outbox(
+        self,
+        status: Optional[Union[TicketStatus, str]] = None,
+        include_terminal: bool = False,
+    ) -> list[Ticket]:
+        """List tickets the calling agent filed (the agent's outbox).
+
+        Same status / include_terminal semantics as `list_inbox`: defaults to
+        active-only (open + accepted), explicit `status=` takes precedence
+        over `include_terminal`.
+        """
+        params: dict[str, str] = {}
+        if status is not None:
+            params["status"] = str(status)
+        if include_terminal:
+            params["include_terminal"] = "true"
+        data = self._request("GET", "/api/tickets/outbox", params=params, expect=200)
+        return [_ticket_from_payload(t) for t in data["tickets"]]
+
     # ---------------------------------------------------------------
     # Negotiation actions
     # ---------------------------------------------------------------

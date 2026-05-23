@@ -236,6 +236,60 @@ class TestListInbox:
 
 
 # ---------------------------------------------------------------------------
+# list_outbox
+# ---------------------------------------------------------------------------
+
+class TestListOutbox:
+
+    @responses.activate
+    def test_empty_outbox(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
+        assert client.list_outbox() == []
+
+    @responses.activate
+    def test_returns_tickets(self, client) -> None:
+        ids = [uuid4(), uuid4()]
+        responses.get(
+            f"{BASE}/api/tickets/outbox",
+            json={"tickets": [_ticket_payload(ticket_id=i) for i in ids]},
+            status=200,
+        )
+
+        result = client.list_outbox()
+        assert [t.id for t in result] == ids
+        assert all(isinstance(t.id, UUID) for t in result)
+
+    @responses.activate
+    def test_status_filter_passed_as_query_param(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/tickets/outbox",
+            json={"tickets": []}, status=200,
+        )
+        client.list_outbox(status=TicketStatus.OPEN)
+        assert responses.calls[0].request.url.endswith("?status=open")
+
+    @responses.activate
+    def test_status_filter_accepts_string(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
+        client.list_outbox(status="accepted")
+        assert responses.calls[0].request.url.endswith("?status=accepted")
+
+    @responses.activate
+    def test_include_terminal_flag_passed_as_query_param(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
+        client.list_outbox(include_terminal=True)
+        assert "include_terminal=true" in responses.calls[0].request.url
+
+    @responses.activate
+    def test_status_and_include_terminal_both_sent(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
+        client.list_outbox(status="open", include_terminal=True)
+        url = responses.calls[0].request.url
+        assert "status=open" in url
+        assert "include_terminal=true" in url
+
+
+# ---------------------------------------------------------------------------
 # Negotiation actions
 # ---------------------------------------------------------------------------
 
