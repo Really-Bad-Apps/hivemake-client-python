@@ -404,6 +404,72 @@ class TestActions:
         assert "cannot accept from accepted" in str(exc.value)
 
 
+class TestApprovalGates:
+
+    @responses.activate
+    def test_request_approval_sends_action_name(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="pending_approval"),
+                "negotiation": {"id": str(uuid4()), "action": "approval_requested"},
+            },
+            status=201,
+        )
+        ticket = client.request_approval(tid, action_name="merge_pr", message="rev?")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "approval_requested"' in body
+        assert b'"action_name": "merge_pr"' in body
+        assert b'"message": "rev?"' in body
+
+    @responses.activate
+    def test_approve(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="accepted"),
+                "negotiation": {"id": str(uuid4()), "action": "approved"},
+            },
+            status=201,
+        )
+        client.approve(tid, message="lgtm")
+        body = responses.calls[0].request.body
+        assert b'"action": "approved"' in body
+        assert b'"message": "lgtm"' in body
+
+    @responses.activate
+    def test_deny(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="denied"),
+                "negotiation": {"id": str(uuid4()), "action": "denied"},
+            },
+            status=201,
+        )
+        ticket = client.deny(tid)
+        assert ticket.status == TicketStatus.DENIED
+        assert b'"action": "denied"' in responses.calls[0].request.body
+
+    @responses.activate
+    def test_request_revision(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="accepted"),
+                "negotiation": {"id": str(uuid4()), "action": "revision_requested"},
+            },
+            status=201,
+        )
+        client.request_revision(tid, message="tweak")
+        assert b'"action": "revision_requested"' in responses.calls[0].request.body
+
+
 # ---------------------------------------------------------------------------
 # Error mapping
 # ---------------------------------------------------------------------------

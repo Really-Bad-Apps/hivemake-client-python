@@ -188,6 +188,45 @@ class HiveMakeClient:
         return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
 
     # ---------------------------------------------------------------
+    # Approval gates
+    # ---------------------------------------------------------------
+
+    def request_approval(
+        self,
+        ticket_id: Union[UUID, str],
+        action_name: str,
+        message: str = "",
+    ) -> Ticket:
+        """Gate a config-defined domain action on a ticket this agent is working.
+
+        `action_name` is the domain action (e.g. "merge_pr") whose approval
+        target is defined in this agent's HiveMake config. Moves the ticket to
+        pending_approval, parked on the configured approver.
+        """
+        body = {
+            "action": NegotiationAction.APPROVAL_REQUESTED.value,
+            "action_name": action_name,
+            "message": message,
+        }
+        data = self._request(
+            "POST", f"/api/tickets/{ticket_id}/negotiations",
+            json_body=body, expect=201,
+        )
+        return _ticket_from_payload(data["ticket"])
+
+    def approve(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Approve a ticket gated to this agent. pending_approval → accepted."""
+        return self._dispatch_action(ticket_id, NegotiationAction.APPROVED, message)
+
+    def deny(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Deny a ticket gated to this agent. pending_approval → denied (terminal)."""
+        return self._dispatch_action(ticket_id, NegotiationAction.DENIED, message)
+
+    def request_revision(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Send a gated ticket back for changes. pending_approval → accepted."""
+        return self._dispatch_action(ticket_id, NegotiationAction.REVISION_REQUESTED, message)
+
+    # ---------------------------------------------------------------
     # Internals
     # ---------------------------------------------------------------
 
