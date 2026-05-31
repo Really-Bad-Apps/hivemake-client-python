@@ -20,6 +20,11 @@ from uuid import UUID
 import requests
 
 from hivemake_models import (
+    Agent,
+    AgentMatch,
+    AgentStatus,
+    ApprovalTarget,
+    GatedAction,
     NegotiationAction,
     Ticket,
     TicketPriority,
@@ -52,6 +57,15 @@ class FileTicketRequest:
     description: str
     priority: Union[TicketPriority, str] = TicketPriority.MEDIUM
     message: str = ""
+
+
+@dataclass
+class RegistrationResult:
+    """Return shape of `HiveMakeClient.register`. Bundles the now-registered
+    agent with its current `gated_actions` policy so the agent learns the
+    rules in one round trip."""
+    agent: Agent
+    policy: list[GatedAction]
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -227,6 +241,50 @@ class HiveMakeClient:
         return self._dispatch_action(ticket_id, NegotiationAction.REVISION_REQUESTED, message)
 
     # ---------------------------------------------------------------
+    # Agent self-description + discovery
+    # ---------------------------------------------------------------
+
+    def register(self, description: str) -> RegistrationResult:
+        """Register (or re-register) this agent's capabilities.
+
+        Required before any other tool — until this call succeeds the agent
+        is a "ghost" and the server returns 403 registration_required from
+        every other endpoint. Idempotent: re-calling refreshes the
+        description, regenerates the embedding, and re-stamps registered_at.
+        """
+        body = {"description": description}
+        data = self._request("POST", "/api/agents/register", json_body=body, expect=200)
+        return RegistrationResult(
+            agent=_agent_from_payload(data["agent"]),
+            policy=[_gated_action_from_payload(g) for g in (data.get("policy") or [])],
+        )
+
+    def discover_agents(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+    ) -> list[AgentMatch]:
+        """Semantic search for other registered agents in this agent's hive.
+
+        Used to route work to the right project without hand-fed UUIDs.
+        Returns up to `limit` matches (server-clamped). The caller's own
+        agent is always excluded; ghosts are excluded too."""
+        params: dict[str, str] = {"q": query}
+        if limit is not None:
+            params["limit"] = str(limit)
+        data = self._request("GET", "/api/agents/discover", params=params, expect=200)
+        return [_agent_match_from_payload(m) for m in data["matches"]]
+
+    def get_policy(self) -> list[GatedAction]:
+        """Return this agent's `gated_actions` policy as a list of
+        `GatedAction` records (possibly empty).
+
+        The owner sets `gated_actions` server-side; the agent reads it here
+        to learn at runtime which domain actions require `request_approval`."""
+        data = self._request("GET", "/api/agents/policy", expect=200)
+        return [_gated_action_from_payload(g) for g in (data.get("policy") or [])]
+
+    # ---------------------------------------------------------------
     # Internals
     # ---------------------------------------------------------------
 
@@ -260,6 +318,46 @@ class HiveMakeClient:
         if resp.status_code != expect:
             _raise_for_status(resp)
         return resp.json()
+
+
+_AGENT_UUID_FIELDS = ("id", "hive_id", "project_id")
+
+
+def _agent_from_payload(payload: dict[str, Any]) -> Agent:
+    """Build an Agent dataclass from the server's JSON payload."""
+    out = dict(payload)
+    for key in _AGENT_UUID_FIELDS:
+        v = out.get(key)
+        if isinstance(v, str):
+            out[key] = UUID(v)
+    out["status"] = AgentStatus(out["status"])
+    return Agent(**out)
+
+
+def _agent_match_from_payload(payload: dict[str, Any]) -> AgentMatch:
+    return AgentMatch(
+        agent_id=UUID(payload["agent_id"]) if isinstance(payload["agent_id"], str) else payload["agent_id"],
+        project_id=UUID(payload["project_id"]) if isinstance(payload["project_id"], str) else payload["project_id"],
+        name=payload["name"],
+        description=payload.get("description") or "",
+        score=float(payload["score"]),
+    )
+
+
+def _gated_action_from_payload(payload: dict[str, Any]) -> GatedAction:
+    """Build a GatedAction from the server's wire format. The wire shape
+    carries both `agent_id` and `user_id` on `approval_target` (with the
+    unset one as null) — matches the dataclass round-trip."""
+    target = payload.get("approval_target") or {}
+    agent_id_raw = target.get("agent_id")
+    user_id_raw = target.get("user_id")
+    return GatedAction(
+        action=payload["action"],
+        approval_target=ApprovalTarget(
+            agent_id=UUID(agent_id_raw) if agent_id_raw else None,
+            user_id=UUID(user_id_raw) if user_id_raw else None,
+        ),
+    )
 
 
 def _ticket_from_payload(payload: dict[str, Any]) -> Ticket:
