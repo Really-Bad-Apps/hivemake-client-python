@@ -391,6 +391,23 @@ class TestActions:
         assert b'"action": "info_provided"' in responses.calls[0].request.body
 
     @responses.activate
+    def test_escalate(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="escalated"),
+                "negotiation": {"id": str(uuid4()), "action": "escalated"},
+            },
+            status=201,
+        )
+        ticket = client.escalate(tid, message="discover empty")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "escalated"' in body
+        assert b'"message": "discover empty"' in body
+
+    @responses.activate
     def test_invalid_transition_raises_conflict(self, client) -> None:
         tid = uuid4()
         responses.post(

@@ -137,6 +137,11 @@ class HiveMakeClient:
         `status` to filter to a single state, or `include_terminal=True` to
         include resolved/rejected. Server-side: `status=` takes precedence
         over `include_terminal`.
+
+        ESCALATED is NOT in the default active filter — once an agent escalates
+        a ticket, it's in human hands until a recovery action moves it back to
+        ACCEPTED, at which point it reappears in the default inbox. To see your
+        own escalations explicitly, pass `status=TicketStatus.ESCALATED`.
         """
         params: dict[str, str] = {}
         if status is not None:
@@ -155,7 +160,8 @@ class HiveMakeClient:
 
         Same status / include_terminal semantics as `list_inbox`: defaults to
         active-only (open + accepted), explicit `status=` takes precedence
-        over `include_terminal`.
+        over `include_terminal`. ESCALATED tickets the agent filed against
+        someone else's project are visible via `status=TicketStatus.ESCALATED`.
         """
         params: dict[str, str] = {}
         if status is not None:
@@ -239,6 +245,20 @@ class HiveMakeClient:
     def request_revision(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Send a gated ticket back for changes. pending_approval → accepted."""
         return self._dispatch_action(ticket_id, NegotiationAction.REVISION_REQUESTED, message)
+
+    # ---------------------------------------------------------------
+    # Escalation (agent-side: "I'm stuck, ask a human")
+    # ---------------------------------------------------------------
+
+    def escalate(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Escalate a stuck accepted ticket to the humans in this hive.
+
+        Only valid when the agent is the assignee AND the ticket is in
+        ACCEPTED — escalation is the "I'm mid-work and blocked" lever.
+        Broadcast: every hive member sees it on the escalation queue, and
+        the hive owners get a Telegram DM if linked.
+        """
+        return self._dispatch_action(ticket_id, NegotiationAction.ESCALATED, message)
 
     # ---------------------------------------------------------------
     # Agent self-description + discovery
