@@ -391,6 +391,40 @@ class TestActions:
         assert b'"action": "info_provided"' in responses.calls[0].request.body
 
     @responses.activate
+    def test_close(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="closed"),
+                "negotiation": {"id": str(uuid4()), "action": "closed"},
+            },
+            status=201,
+        )
+        ticket = client.close(tid, message="dupe of #123")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "closed"' in body
+        assert b'"message": "dupe of #123"' in body
+
+    @responses.activate
+    def test_withdraw(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="withdrawn"),
+                "negotiation": {"id": str(uuid4()), "action": "withdrawn"},
+            },
+            status=201,
+        )
+        ticket = client.withdraw(tid, message="never mind")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "withdrawn"' in body
+        assert b'"message": "never mind"' in body
+
+    @responses.activate
     def test_escalate(self, client) -> None:
         tid = uuid4()
         responses.post(
@@ -613,6 +647,24 @@ class TestDiscoverAgents:
         )
         client.discover_agents("foo", limit=5)
         assert "limit=5" in responses.calls[0].request.url
+
+    @responses.activate
+    def test_discover_min_score_omitted_when_none(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={"matches": []}, status=200,
+        )
+        client.discover_agents("foo")
+        assert "min_score" not in responses.calls[0].request.url
+
+    @responses.activate
+    def test_discover_min_score_passed_when_set(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={"matches": []}, status=200,
+        )
+        client.discover_agents("foo", min_score=0.3)
+        assert "min_score=0.3" in responses.calls[0].request.url
 
     @responses.activate
     def test_discover_registration_required_403(self, client) -> None:

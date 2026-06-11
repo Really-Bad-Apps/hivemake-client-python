@@ -184,6 +184,17 @@ class HiveMakeClient:
     def resolve(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
 
+    def close(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Assignee marks the ticket no-fault terminal (obsolete/duplicate/won't-fix).
+        OPEN | ACCEPTED → CLOSED. Distinct from reject ("not your problem")
+        and resolve ("work delivered")."""
+        return self._dispatch_action(ticket_id, NegotiationAction.CLOSED, message)
+
+    def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        """Creator cancels their own ticket. OPEN | ACCEPTED → WITHDRAWN.
+        PENDING_APPROVAL and ESCALATED EXCLUDED."""
+        return self._dispatch_action(ticket_id, NegotiationAction.WITHDRAWN, message)
+
     def redirect(
         self,
         ticket_id: Union[UUID, str],
@@ -283,15 +294,20 @@ class HiveMakeClient:
         self,
         query: str,
         limit: Optional[int] = None,
+        min_score: Optional[float] = None,
     ) -> list[AgentMatch]:
         """Semantic search for other registered agents in this agent's hive.
 
         Used to route work to the right project without hand-fed UUIDs.
         Returns up to `limit` matches (server-clamped). The caller's own
-        agent is always excluded; ghosts are excluded too."""
+        agent is always excluded; ghosts are excluded too. `min_score` is
+        a cosine-similarity floor in [-1, 1]; if None, the server applies
+        its default (0.5)."""
         params: dict[str, str] = {"q": query}
         if limit is not None:
             params["limit"] = str(limit)
+        if min_score is not None:
+            params["min_score"] = str(min_score)
         data = self._request("GET", "/api/agents/discover", params=params, expect=200)
         return [_agent_match_from_payload(m) for m in data["matches"]]
 
