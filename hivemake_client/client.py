@@ -181,8 +181,24 @@ class HiveMakeClient:
     def reject(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.REJECTED, message)
 
-    def resolve(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+    def resolve(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+        """Assignee marks the ticket as resolved. OPEN | ACCEPTED → RESOLVED.
+
+        Soft-terminal — the creator can call reopen() to dispute. `message`
+        is required and must be non-empty; it is written to the ticket's
+        `resolution` field so the requester can read it without scraping
+        the negotiation trail. Whitespace-only counts as empty (server
+        returns 422)."""
         return self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
+
+    def reopen(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+        """Creator disputes a resolution. RESOLVED → OPEN.
+
+        Clears the ticket's `resolution` field; the negotiation trail keeps
+        the full history. `message` is required and must be non-empty —
+        the assignee needs to know why the resolution was rejected.
+        Unbounded: a ticket can be reopened any number of times."""
+        return self._dispatch_action(ticket_id, NegotiationAction.REOPENED, message)
 
     def close(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Assignee marks the ticket no-fault terminal (obsolete/duplicate/won't-fix).

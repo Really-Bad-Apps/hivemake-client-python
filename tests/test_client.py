@@ -345,6 +345,56 @@ class TestActions:
         assert b'"action": "resolved"' in body
         assert b'"message": "shipped"' in body
 
+    def test_resolve_requires_message_positionally(self, client) -> None:
+        """`message` is required — no default — so the SDK fails at the call
+        site rather than reaching the wire with an empty string."""
+        with pytest.raises(TypeError):
+            client.resolve(uuid4())
+
+    @responses.activate
+    def test_resolve_empty_message_maps_to_validation_error(self, client) -> None:
+        """Server returns 422 for empty messages; client raises validation."""
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={"error": "validation_error", "detail": "message required"},
+            status=422,
+        )
+        with pytest.raises(HiveMakeValidationError):
+            client.resolve(tid, message="")
+
+    @responses.activate
+    def test_reopen(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="open"),
+                "negotiation": {"id": str(uuid4()), "action": "reopened"},
+            },
+            status=201,
+        )
+        ticket = client.reopen(tid, message="regression in panel-3")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "reopened"' in body
+        assert b'"message": "regression in panel-3"' in body
+
+    def test_reopen_requires_message_positionally(self, client) -> None:
+        with pytest.raises(TypeError):
+            client.reopen(uuid4())
+
+    @responses.activate
+    def test_reopen_empty_message_maps_to_validation_error(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={"error": "validation_error", "detail": "message required"},
+            status=422,
+        )
+        with pytest.raises(HiveMakeValidationError):
+            client.reopen(tid, message="")
+
     @responses.activate
     def test_redirect(self, client) -> None:
         tid = uuid4()
