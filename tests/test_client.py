@@ -324,9 +324,26 @@ class TestActions:
             },
             status=201,
         )
-        ticket = client.reject(tid)
+        ticket = client.reject(tid, message="not ours")
         assert ticket.id == tid
-        assert b'"action": "rejected"' in responses.calls[0].request.body
+        body = responses.calls[0].request.body
+        assert b'"action": "rejected"' in body
+        assert b'"message": "not ours"' in body
+
+    def test_reject_requires_message_positionally(self, client) -> None:
+        with pytest.raises(TypeError):
+            client.reject(uuid4())
+
+    @responses.activate
+    def test_reject_empty_message_maps_to_validation_error(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={"error": "empty_message", "detail": "message required"},
+            status=422,
+        )
+        with pytest.raises(HiveMakeValidationError):
+            client.reject(tid, message="")
 
     @responses.activate
     def test_resolve(self, client) -> None:
@@ -456,6 +473,21 @@ class TestActions:
         body = responses.calls[0].request.body
         assert b'"action": "closed"' in body
         assert b'"message": "dupe of #123"' in body
+
+    def test_close_requires_message_positionally(self, client) -> None:
+        with pytest.raises(TypeError):
+            client.close(uuid4())
+
+    @responses.activate
+    def test_close_empty_message_maps_to_validation_error(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={"error": "empty_message", "detail": "message required"},
+            status=422,
+        )
+        with pytest.raises(HiveMakeValidationError):
+            client.close(tid, message="")
 
     @responses.activate
     def test_withdraw(self, client) -> None:

@@ -178,7 +178,12 @@ class HiveMakeClient:
     def accept(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.ACCEPTED, message)
 
-    def reject(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+    def reject(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+        """Assignee rejects the ticket. OPEN → REJECTED. Terminal.
+
+        `message` is required and must be non-empty server-side (422).
+        The creator needs a reason ("not my project", "duplicate",
+        "out of scope," etc.) — empty rejections are useless to them."""
         return self._dispatch_action(ticket_id, NegotiationAction.REJECTED, message)
 
     def resolve(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
@@ -200,10 +205,14 @@ class HiveMakeClient:
         Unbounded: a ticket can be reopened any number of times."""
         return self._dispatch_action(ticket_id, NegotiationAction.REOPENED, message)
 
-    def close(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+    def close(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """Assignee marks the ticket no-fault terminal (obsolete/duplicate/won't-fix).
         OPEN | ACCEPTED → CLOSED. Distinct from reject ("not your problem")
-        and resolve ("work delivered")."""
+        and resolve ("work delivered").
+
+        `message` is required and must be non-empty server-side (422).
+        The creator needs to know why no work will happen — "duplicate
+        of #N", "obsolete", "scope changed," etc."""
         return self._dispatch_action(ticket_id, NegotiationAction.CLOSED, message)
 
     def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
