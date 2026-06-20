@@ -211,7 +211,8 @@ class HiveMakeClient:
 
     def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Creator cancels their own ticket. OPEN | ACCEPTED → WITHDRAWN.
-        PENDING_APPROVAL and ESCALATED EXCLUDED."""
+        ESCALATED is excluded — mid-flight escalations stay with the humans
+        handling them."""
         return self._dispatch_action(ticket_id, NegotiationAction.WITHDRAWN, message)
 
     def redirect(
