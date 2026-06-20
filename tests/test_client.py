@@ -22,7 +22,6 @@ from hivemake_client import (
     HiveMakeValidationError,
 )
 from hivemake_models import (
-    GatedAction,
     NegotiationAction,
     TicketPriority,
     TicketStatus,
@@ -54,8 +53,6 @@ def _ticket_payload(
         "created_at": 1700000000,
         "updated_at": 1700000001,
         "assigned_agent_id": str(assigned_agent_id) if assigned_agent_id else None,
-        "pending_approval_from_agent_id": None,
-        "pending_approval_from_user_id": None,
         "requested_by_user_id": None,
         "resolution": None,
     }
@@ -538,72 +535,6 @@ class TestActions:
         assert "cannot accept from accepted" in str(exc.value)
 
 
-class TestApprovalGates:
-
-    @responses.activate
-    def test_request_approval_sends_action_name(self, client) -> None:
-        tid = uuid4()
-        responses.post(
-            f"{BASE}/api/tickets/{tid}/negotiations",
-            json={
-                "ticket": _ticket_payload(ticket_id=tid, status="pending_approval"),
-                "negotiation": {"id": str(uuid4()), "action": "approval_requested"},
-            },
-            status=201,
-        )
-        ticket = client.request_approval(tid, action_name="merge_pr", message="rev?")
-        assert ticket.id == tid
-        body = responses.calls[0].request.body
-        assert b'"action": "approval_requested"' in body
-        assert b'"action_name": "merge_pr"' in body
-        assert b'"message": "rev?"' in body
-
-    @responses.activate
-    def test_approve(self, client) -> None:
-        tid = uuid4()
-        responses.post(
-            f"{BASE}/api/tickets/{tid}/negotiations",
-            json={
-                "ticket": _ticket_payload(ticket_id=tid, status="accepted"),
-                "negotiation": {"id": str(uuid4()), "action": "approved"},
-            },
-            status=201,
-        )
-        client.approve(tid, message="lgtm")
-        body = responses.calls[0].request.body
-        assert b'"action": "approved"' in body
-        assert b'"message": "lgtm"' in body
-
-    @responses.activate
-    def test_deny(self, client) -> None:
-        tid = uuid4()
-        responses.post(
-            f"{BASE}/api/tickets/{tid}/negotiations",
-            json={
-                "ticket": _ticket_payload(ticket_id=tid, status="denied"),
-                "negotiation": {"id": str(uuid4()), "action": "denied"},
-            },
-            status=201,
-        )
-        ticket = client.deny(tid)
-        assert ticket.status == TicketStatus.DENIED
-        assert b'"action": "denied"' in responses.calls[0].request.body
-
-    @responses.activate
-    def test_request_revision(self, client) -> None:
-        tid = uuid4()
-        responses.post(
-            f"{BASE}/api/tickets/{tid}/negotiations",
-            json={
-                "ticket": _ticket_payload(ticket_id=tid, status="accepted"),
-                "negotiation": {"id": str(uuid4()), "action": "revision_requested"},
-            },
-            status=201,
-        )
-        client.request_revision(tid, message="tweak")
-        assert b'"action": "revision_requested"' in responses.calls[0].request.body
-
-
 # ---------------------------------------------------------------------------
 # Agent registration + discovery
 # ---------------------------------------------------------------------------
@@ -632,38 +563,14 @@ class TestRegister:
         agent_id = uuid4()
         responses.post(
             f"{BASE}/api/agents/register",
-            json={"agent": _agent_payload(agent_id=agent_id), "policy": []},
+            json={"agent": _agent_payload(agent_id=agent_id)},
             status=200,
         )
         result = client.register("Watches loki logs and files bug tickets")
 
         assert result.agent.id == agent_id
         assert result.agent.registered_at == 1700000010
-        assert result.policy == []
         assert b'"description":' in responses.calls[0].request.body
-
-    @responses.activate
-    def test_register_returns_policy(self, client) -> None:
-        agent_id = uuid4()
-        approver = uuid4()
-        # Wire format mirrors dataclasses.asdict on GatedAction — both target
-        # ids appear, the unset one is null.
-        gated_wire = [{
-            "action": "deploy",
-            "approval_target": {"agent_id": None, "user_id": str(approver)},
-        }]
-        responses.post(
-            f"{BASE}/api/agents/register",
-            json={"agent": _agent_payload(agent_id=agent_id), "policy": gated_wire},
-            status=200,
-        )
-        result = client.register("Manages deploys with approval gates")
-
-        assert len(result.policy) == 1
-        assert isinstance(result.policy[0], GatedAction)
-        assert result.policy[0].action == "deploy"
-        assert result.policy[0].approval_target.user_id == approver
-        assert result.policy[0].approval_target.agent_id is None
 
     @responses.activate
     def test_register_validation_error(self, client) -> None:
@@ -758,34 +665,6 @@ class TestDiscoverAgents:
         )
         with pytest.raises(HiveMakeForbidden):
             client.discover_agents("anything")
-
-
-class TestGetPolicy:
-
-    @responses.activate
-    def test_get_policy_returns_gated_actions(self, client) -> None:
-        approver_user = uuid4()
-        approver_agent = uuid4()
-        gated_wire = [
-            {"action": "deploy",
-             "approval_target": {"agent_id": None, "user_id": str(approver_user)}},
-            {"action": "merge_pr",
-             "approval_target": {"agent_id": str(approver_agent), "user_id": None}},
-        ]
-        responses.get(f"{BASE}/api/agents/policy", json={"policy": gated_wire}, status=200)
-
-        policy = client.get_policy()
-        assert len(policy) == 2
-        assert all(isinstance(g, GatedAction) for g in policy)
-        assert policy[0].action == "deploy"
-        assert policy[0].approval_target.user_id == approver_user
-        assert policy[1].action == "merge_pr"
-        assert policy[1].approval_target.agent_id == approver_agent
-
-    @responses.activate
-    def test_get_policy_empty(self, client) -> None:
-        responses.get(f"{BASE}/api/agents/policy", json={"policy": []}, status=200)
-        assert client.get_policy() == []
 
 
 # ---------------------------------------------------------------------------

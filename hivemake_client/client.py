@@ -23,8 +23,6 @@ from hivemake_models import (
     Agent,
     AgentMatch,
     AgentStatus,
-    ApprovalTarget,
-    GatedAction,
     NegotiationAction,
     Ticket,
     TicketPriority,
@@ -61,11 +59,9 @@ class FileTicketRequest:
 
 @dataclass
 class RegistrationResult:
-    """Return shape of `HiveMakeClient.register`. Bundles the now-registered
-    agent with its current `gated_actions` policy so the agent learns the
-    rules in one round trip."""
+    """Return shape of `HiveMakeClient.register`. Wraps the now-registered
+    agent record."""
     agent: Agent
-    policy: list[GatedAction]
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -77,8 +73,6 @@ _TICKET_UUID_FIELDS = (
     "project_id",
     "created_by_agent_id",
     "assigned_agent_id",
-    "pending_approval_from_agent_id",
-    "pending_approval_from_user_id",
     "requested_by_user_id",
 )
 
@@ -244,45 +238,6 @@ class HiveMakeClient:
         return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
 
     # ---------------------------------------------------------------
-    # Approval gates
-    # ---------------------------------------------------------------
-
-    def request_approval(
-        self,
-        ticket_id: Union[UUID, str],
-        action_name: str,
-        message: str = "",
-    ) -> Ticket:
-        """Gate a config-defined domain action on a ticket this agent is working.
-
-        `action_name` is the domain action (e.g. "merge_pr") whose approval
-        target is defined in this agent's HiveMake config. Moves the ticket to
-        pending_approval, parked on the configured approver.
-        """
-        body = {
-            "action": NegotiationAction.APPROVAL_REQUESTED.value,
-            "action_name": action_name,
-            "message": message,
-        }
-        data = self._request(
-            "POST", f"/api/tickets/{ticket_id}/negotiations",
-            json_body=body, expect=201,
-        )
-        return _ticket_from_payload(data["ticket"])
-
-    def approve(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        """Approve a ticket gated to this agent. pending_approval → accepted."""
-        return self._dispatch_action(ticket_id, NegotiationAction.APPROVED, message)
-
-    def deny(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        """Deny a ticket gated to this agent. pending_approval → denied (terminal)."""
-        return self._dispatch_action(ticket_id, NegotiationAction.DENIED, message)
-
-    def request_revision(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        """Send a gated ticket back for changes. pending_approval → accepted."""
-        return self._dispatch_action(ticket_id, NegotiationAction.REVISION_REQUESTED, message)
-
-    # ---------------------------------------------------------------
     # Escalation (agent-side: "I'm stuck, ask a human")
     # ---------------------------------------------------------------
 
@@ -310,10 +265,7 @@ class HiveMakeClient:
         """
         body = {"description": description}
         data = self._request("POST", "/api/agents/register", json_body=body, expect=200)
-        return RegistrationResult(
-            agent=_agent_from_payload(data["agent"]),
-            policy=[_gated_action_from_payload(g) for g in (data.get("policy") or [])],
-        )
+        return RegistrationResult(agent=_agent_from_payload(data["agent"]))
 
     def discover_agents(
         self,
@@ -335,15 +287,6 @@ class HiveMakeClient:
             params["min_score"] = str(min_score)
         data = self._request("GET", "/api/agents/discover", params=params, expect=200)
         return [_agent_match_from_payload(m) for m in data["matches"]]
-
-    def get_policy(self) -> list[GatedAction]:
-        """Return this agent's `gated_actions` policy as a list of
-        `GatedAction` records (possibly empty).
-
-        The owner sets `gated_actions` server-side; the agent reads it here
-        to learn at runtime which domain actions require `request_approval`."""
-        data = self._request("GET", "/api/agents/policy", expect=200)
-        return [_gated_action_from_payload(g) for g in (data.get("policy") or [])]
 
     # ---------------------------------------------------------------
     # Internals
@@ -402,22 +345,6 @@ def _agent_match_from_payload(payload: dict[str, Any]) -> AgentMatch:
         name=payload["name"],
         description=payload.get("description") or "",
         score=float(payload["score"]),
-    )
-
-
-def _gated_action_from_payload(payload: dict[str, Any]) -> GatedAction:
-    """Build a GatedAction from the server's wire format. The wire shape
-    carries both `agent_id` and `user_id` on `approval_target` (with the
-    unset one as null) — matches the dataclass round-trip."""
-    target = payload.get("approval_target") or {}
-    agent_id_raw = target.get("agent_id")
-    user_id_raw = target.get("user_id")
-    return GatedAction(
-        action=payload["action"],
-        approval_target=ApprovalTarget(
-            agent_id=UUID(agent_id_raw) if agent_id_raw else None,
-            user_id=UUID(user_id_raw) if user_id_raw else None,
-        ),
     )
 
 
