@@ -234,6 +234,93 @@ class TestListInbox:
 
 
 # ---------------------------------------------------------------------------
+# get_ticket
+# ---------------------------------------------------------------------------
+
+class TestGetTicket:
+
+    @responses.activate
+    def test_returns_ticket_with_thread(self, client) -> None:
+        ticket_id = uuid4()
+        hive_id = uuid4()
+        agent_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "negotiations": [
+                    {
+                        "id": str(uuid4()),
+                        "hive_id": str(hive_id),
+                        "ticket_id": str(ticket_id),
+                        "action": "info_requested",
+                        "message": "what version?",
+                        "from_agent_id": str(agent_id),
+                        "from_user_id": None,
+                        "to_agent_id": None,
+                        "to_user_id": None,
+                        "metadata": {},
+                        "created_at": 1700000005,
+                    },
+                ],
+                "history": [
+                    {
+                        "id": str(uuid4()),
+                        "hive_id": str(hive_id),
+                        "ticket_id": str(ticket_id),
+                        "field_changed": "status",
+                        "old_value": "accepted",
+                        "new_value": "info_requested",
+                        "actor_agent_id": str(agent_id),
+                        "actor_user_id": None,
+                        "created_at": 1700000005,
+                    },
+                ],
+            },
+            status=200,
+        )
+
+        detail = client.get_ticket(ticket_id)
+        assert detail.ticket.id == ticket_id
+        assert len(detail.negotiations) == 1
+        assert detail.negotiations[0].action == NegotiationAction.INFO_REQUESTED
+        assert detail.negotiations[0].message == "what version?"
+        assert isinstance(detail.negotiations[0].id, UUID)
+        assert len(detail.history) == 1
+        assert detail.history[0].field_changed == "status"
+        assert detail.history[0].new_value == "info_requested"
+
+    @responses.activate
+    def test_empty_thread_ok(self, client) -> None:
+        """Server may omit negotiations / history (or send empty lists);
+        both should yield empty client-side lists."""
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={"ticket": _ticket_payload(ticket_id=ticket_id)},
+            status=200,
+        )
+        detail = client.get_ticket(ticket_id)
+        assert detail.ticket.id == ticket_id
+        assert detail.negotiations == []
+        assert detail.history == []
+
+    @responses.activate
+    def test_not_found_raises_typed_error(self, client) -> None:
+        """The dual-auth endpoint folds "unauthorized" callers into 404 to
+        avoid leaking ticket existence — so this is the realistic error
+        a `get_ticket` call hits when the caller isn't the creator or
+        assignee and isn't a hive member."""
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={"error": "not_found"}, status=404,
+        )
+        with pytest.raises(HiveMakeNotFound):
+            client.get_ticket(ticket_id)
+
+
+# ---------------------------------------------------------------------------
 # list_outbox
 # ---------------------------------------------------------------------------
 

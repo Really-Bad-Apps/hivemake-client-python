@@ -23,8 +23,10 @@ from hivemake_models import (
     Agent,
     AgentMatch,
     AgentStatus,
+    Negotiation,
     NegotiationAction,
     Ticket,
+    TicketHistory,
     TicketPriority,
     TicketStatus,
     TicketType,
@@ -62,6 +64,17 @@ class RegistrationResult:
     """Return shape of `HiveMakeClient.register`. Wraps the now-registered
     agent record."""
     agent: Agent
+
+
+@dataclass
+class TicketDetail:
+    """Return shape of `HiveMakeClient.get_ticket`. Carries the ticket
+    record plus the full negotiation thread and history so a tool-only
+    agent can read messages exchanged on the ticket (which `list_inbox`
+    / `list_outbox` deliberately omit)."""
+    ticket: Ticket
+    negotiations: list[Negotiation]
+    history: list[TicketHistory]
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -119,6 +132,27 @@ class HiveMakeClient:
         }
         data = self._request("POST", "/api/tickets", json_body=body, expect=201)
         return _ticket_from_payload(data["ticket"])
+
+    def get_ticket(self, ticket_id: Union[UUID, str]) -> TicketDetail:
+        """Fetch a single ticket plus its full negotiation thread + history.
+
+        This is the read tool a tool-only agent needs to actually see the
+        message text on a `request_info` or `info_provided` negotiation —
+        `list_inbox` / `list_outbox` return only the Ticket record. The
+        caller must be the creator or assignee, or a member of the hive.
+        """
+        data = self._request(
+            "GET", f"/api/tickets/{ticket_id}", expect=200,
+        )
+        return TicketDetail(
+            ticket=_ticket_from_payload(data["ticket"]),
+            negotiations=[
+                _negotiation_from_payload(n) for n in data.get("negotiations", [])
+            ],
+            history=[
+                _history_from_payload(h) for h in data.get("history", [])
+            ],
+        )
 
     def list_inbox(
         self,
@@ -347,6 +381,45 @@ def _agent_match_from_payload(payload: dict[str, Any]) -> AgentMatch:
         description=payload.get("description") or "",
         score=float(payload["score"]),
     )
+
+
+_NEGOTIATION_UUID_FIELDS = (
+    "id",
+    "hive_id",
+    "ticket_id",
+    "from_agent_id",
+    "from_user_id",
+    "to_agent_id",
+    "to_user_id",
+)
+
+
+_HISTORY_UUID_FIELDS = (
+    "id",
+    "hive_id",
+    "ticket_id",
+    "actor_agent_id",
+    "actor_user_id",
+)
+
+
+def _negotiation_from_payload(payload: dict[str, Any]) -> Negotiation:
+    out = dict(payload)
+    for key in _NEGOTIATION_UUID_FIELDS:
+        v = out.get(key)
+        if isinstance(v, str):
+            out[key] = UUID(v)
+    out["action"] = NegotiationAction(out["action"])
+    return Negotiation(**out)
+
+
+def _history_from_payload(payload: dict[str, Any]) -> TicketHistory:
+    out = dict(payload)
+    for key in _HISTORY_UUID_FIELDS:
+        v = out.get(key)
+        if isinstance(v, str):
+            out[key] = UUID(v)
+    return TicketHistory(**out)
 
 
 def _ticket_from_payload(payload: dict[str, Any]) -> Ticket:

@@ -1,6 +1,11 @@
 """Python client SDK for the HiveMake.ai REST API."""
 
-from hivemake_client.client import FileTicketRequest, HiveMakeClient, RegistrationResult
+from hivemake_client.client import (
+    FileTicketRequest,
+    HiveMakeClient,
+    RegistrationResult,
+    TicketDetail,
+)
 from hivemake_client.exceptions import (
     HiveMakeAPIError,
     HiveMakeAuthError,
@@ -19,6 +24,7 @@ __all__ = [
     "HiveMakeClient",
     "FileTicketRequest",
     "RegistrationResult",
+    "TicketDetail",
     "HiveMakeError",
     "HiveMakeConfigError",
     "HiveMakeAPIError",
