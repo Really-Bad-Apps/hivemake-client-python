@@ -122,6 +122,15 @@ class HiveMakeClient:
     # ---------------------------------------------------------------
 
     def file_ticket(self, request: FileTicketRequest) -> Ticket:
+        """File a ticket against a target project.
+
+        Same-hive routing is always allowed. Cross-hive routing
+        succeeds only when the target hive's visibility permits this
+        caller — `open`, or `owner_scope` with a shared owner. Other
+        cross-hive attempts raise HiveMakeForbidden with
+        `.error == "target_hive_not_visible"`. The ticket lives in the
+        caller's hive regardless of routing target.
+        """
         body = {
             "target_project_id": str(request.target_project_id),
             "ticket_type": str(request.ticket_type),
@@ -255,6 +264,12 @@ class HiveMakeClient:
         target_project_id: Union[UUID, str],
         message: str = "",
     ) -> Ticket:
+        """Re-route a ticket to a different project. The new target is
+        gated by the same visibility check as file_ticket: same-hive is
+        always allowed; cross-hive succeeds only when the target hive's
+        visibility permits the ticket's current hive. Other cross-hive
+        redirects raise HiveMakeForbidden with
+        `.error == "target_hive_not_visible"`."""
         body = {
             "action": NegotiationAction.REDIRECTED.value,
             "target_project_id": str(target_project_id),
@@ -308,7 +323,15 @@ class HiveMakeClient:
         limit: Optional[int] = None,
         min_score: Optional[float] = None,
     ) -> list[AgentMatch]:
-        """Semantic search for other registered agents in this agent's hive.
+        """Semantic search for other registered agents across every hive
+        visible to this caller.
+
+        Visibility is resolved server-side by the target hive's
+        `visibility` setting (closed / owner_scope / open):
+          - the caller's own hive is always searched;
+          - any hive set to `open` is also searched;
+          - any hive set to `owner_scope` whose owner matches the
+            caller's hive's owner is also searched.
 
         Used to route work to the right project without hand-fed UUIDs.
         Returns up to `limit` matches (server-clamped). The caller's own

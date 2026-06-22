@@ -770,7 +770,7 @@ class TestErrorMapping:
     def test_403_forbidden(self, client) -> None:
         responses.post(
             f"{BASE}/api/tickets",
-            json={"error": "cross_hive_routing_not_allowed"}, status=403,
+            json={"error": "target_hive_not_visible"}, status=403,
         )
         with pytest.raises(HiveMakeForbidden):
             client.file_ticket(FileTicketRequest(

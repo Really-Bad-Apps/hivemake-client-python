@@ -40,7 +40,9 @@ class HiveMakeAuthError(HiveMakeAPIError):
 
 
 class HiveMakeForbidden(HiveMakeAPIError):
-    """403 — e.g. cross-hive routing, unauthorized actor for the action."""
+    """403 — e.g. unauthorized actor for the action, or `target_hive_not_visible`
+    when cross-hive routing is denied by the target hive's visibility setting
+    (closed / owner_scope mismatch). Inspect `.error` for the specific reason."""
 
 
 class HiveMakeNotFound(HiveMakeAPIError):
