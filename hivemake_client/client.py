@@ -336,28 +336,37 @@ class HiveMakeClient:
 
         Used to route work to the right project without hand-fed UUIDs.
         Returns a `DiscoverAgentsResult` carrying up to `limit` matches
-        (server-clamped) plus diagnostic counters — `candidates_searched`
-        (pool size pre-threshold), `threshold_used`, `visible_hive_count`
-        — so callers can tell why a result is empty (visibility blocked,
-        no candidates, or threshold filtered everything).
+        (server-clamped) plus four diagnostic counters — `pool_size`
+        (registered, non-caller agents the search compared against),
+        `threshold_dropped` (top-`limit` candidates that fell below the
+        floor), `threshold_used`, and `visible_hive_count` — so callers
+        can pinpoint why a result is empty: visibility blocked, no
+        candidates, threshold filtered, or query just missed.
 
         The caller's own agent is always excluded; ghosts are excluded too.
         `min_score` is a cosine-similarity floor in [-1, 1]; if None, the
-        server applies its default (0.2 as of hivemake-server :49)."""
+        server applies its default (0.2 as of hivemake-server v0.8.0)."""
         params: dict[str, str] = {"q": query}
         if limit is not None:
             params["limit"] = str(limit)
         if min_score is not None:
             params["min_score"] = str(min_score)
         data = self._request("GET", "/api/agents/discover", params=params, expect=200)
-        # Diagnostic counters shipped in hivemake-server 0.7.0. Pre-0.7.0
-        # responses won't carry them — degrade gracefully (zeros + the
-        # default threshold) rather than raise KeyError. A caller running
-        # this SDK against an older server will see matches but lose the
-        # failure-mode diagnostics; that's a softer failure than crashing.
+        # Diagnostic counters: `pool_size` + `threshold_dropped` shipped in
+        # hivemake-server v0.8.0; `threshold_used` + `visible_hive_count`
+        # shipped in v0.7.0. Older servers omit some/all of them — degrade
+        # gracefully (zeros + the default threshold) rather than raise
+        # KeyError. A caller running this SDK against an older server still
+        # sees matches; only the diagnostic story degrades.
+        #
+        # The `pool_size` lookup also falls back to the v0.7.0 field name
+        # `candidates_searched` — that's the one wire-rename in the slice,
+        # and the fallback covers the transient window where a new SDK
+        # talks to a v0.7.0 server before the server is upgraded too.
         return DiscoverAgentsResult(
             matches=[_agent_match_from_payload(m) for m in data["matches"]],
-            candidates_searched=int(data.get("candidates_searched", 0)),
+            pool_size=int(data.get("pool_size", data.get("candidates_searched", 0))),
+            threshold_dropped=int(data.get("threshold_dropped", 0)),
             threshold_used=float(data.get("threshold_used", 0.2)),
             visible_hive_count=int(data.get("visible_hive_count", 1)),
         )

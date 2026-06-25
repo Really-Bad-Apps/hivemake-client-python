@@ -680,11 +680,12 @@ class TestRegister:
 
 class TestDiscoverAgents:
 
-    # Canonical empty response — server returns matches + the three
-    # diagnostic counters even when nothing matched.
+    # Canonical empty response — server returns matches + four diagnostic
+    # counters even when nothing matched.
     _EMPTY_RESPONSE = {
         "matches": [],
-        "candidates_searched": 0,
+        "pool_size": 0,
+        "threshold_dropped": 0,
         "threshold_used": 0.2,
         "visible_hive_count": 1,
     }
@@ -716,7 +717,8 @@ class TestDiscoverAgents:
                         "score": 0.92,
                     },
                 ],
-                "candidates_searched": 3,
+                "pool_size": 3,
+                "threshold_dropped": 1,
                 "threshold_used": 0.2,
                 "visible_hive_count": 2,
             }, status=200,
@@ -729,13 +731,38 @@ class TestDiscoverAgents:
         assert result.matches[0].name == "Boudica"
         assert result.matches[0].score == 0.92
         # Diagnostic counters parsed off the wire.
-        assert result.candidates_searched == 3
+        assert result.pool_size == 3
+        assert result.threshold_dropped == 1
         assert result.threshold_used == 0.2
         assert result.visible_hive_count == 2
 
     @responses.activate
+    def test_discover_pool_size_falls_back_to_candidates_searched(self, client) -> None:
+        # A v0.7.0 server sends `candidates_searched` instead of `pool_size`
+        # (the rename happened in v0.8.0). The SDK should read it under the
+        # legacy key so a v0.4.0 SDK against a v0.7.0 server doesn't lose
+        # the pool diagnostic during a partial upgrade.
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={
+                "matches": [],
+                "candidates_searched": 7,  # v0.7.0 wire field
+                "threshold_used": 0.5,
+                "visible_hive_count": 3,
+                # NOTE: no `pool_size`, no `threshold_dropped`.
+            }, status=200,
+        )
+        result = client.discover_agents("anything")
+
+        assert result.matches == []
+        assert result.pool_size == 7  # fell back to candidates_searched
+        assert result.threshold_dropped == 0  # not present in v0.7.0
+        assert result.threshold_used == 0.5
+        assert result.visible_hive_count == 3
+
+    @responses.activate
     def test_discover_tolerates_older_server_without_diagnostics(self, client) -> None:
-        # A pre-0.7.0 hivemake-server returns only {"matches": [...]} with
+        # A pre-v0.7.0 hivemake-server returns only {"matches": [...]} with
         # no diagnostic counters. The SDK should NOT KeyError — it should
         # fall back to safe defaults (zeros + the 0.2 threshold) so a
         # newer SDK against an older server still works.
@@ -746,28 +773,53 @@ class TestDiscoverAgents:
         result = client.discover_agents("anything")
 
         assert result.matches == []
-        assert result.candidates_searched == 0
+        assert result.pool_size == 0
+        assert result.threshold_dropped == 0
         assert result.threshold_used == 0.2
         assert result.visible_hive_count == 1
 
     @responses.activate
     def test_discover_diagnostics_when_pool_nonempty_but_filtered(self, client) -> None:
         # The bug-the-PM-hit shape: pool of 4 candidates, threshold filters
-        # all of them out. SDK surfaces the diagnostic so the caller can
-        # tell why matches is empty.
+        # all of them out. SDK surfaces the threshold_dropped counter so
+        # the caller can tell why matches is empty AND know that lowering
+        # min_score would recover 4 matches.
         responses.get(
             f"{BASE}/api/agents/discover",
             json={
                 "matches": [],
-                "candidates_searched": 4,
+                "pool_size": 4,
+                "threshold_dropped": 4,
                 "threshold_used": 0.2,
                 "visible_hive_count": 5,
             }, status=200,
         )
         result = client.discover_agents("materia")
         assert result.matches == []
-        assert result.candidates_searched == 4
+        assert result.pool_size == 4
+        assert result.threshold_dropped == 4
         assert result.visible_hive_count == 5
+
+    @responses.activate
+    def test_discover_diagnostics_when_pool_nonempty_query_misses(self, client) -> None:
+        # The "query just doesn't match anyone" shape: pool has agents but
+        # none of them landed in the top-N at all (so threshold_dropped is 0).
+        # Tells the caller a lower min_score won't help — the query is the
+        # problem, not the floor.
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={
+                "matches": [],
+                "pool_size": 4,
+                "threshold_dropped": 0,
+                "threshold_used": 0.2,
+                "visible_hive_count": 5,
+            }, status=200,
+        )
+        result = client.discover_agents("totally unrelated keyword")
+        assert result.matches == []
+        assert result.pool_size == 4
+        assert result.threshold_dropped == 0
 
     @responses.activate
     def test_discover_limit_passed_as_query_param(self, client) -> None:
