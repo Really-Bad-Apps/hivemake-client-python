@@ -734,6 +734,23 @@ class TestDiscoverAgents:
         assert result.visible_hive_count == 2
 
     @responses.activate
+    def test_discover_tolerates_older_server_without_diagnostics(self, client) -> None:
+        # A pre-0.7.0 hivemake-server returns only {"matches": [...]} with
+        # no diagnostic counters. The SDK should NOT KeyError — it should
+        # fall back to safe defaults (zeros + the 0.2 threshold) so a
+        # newer SDK against an older server still works.
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={"matches": []}, status=200,  # Note: NO diagnostic fields.
+        )
+        result = client.discover_agents("anything")
+
+        assert result.matches == []
+        assert result.candidates_searched == 0
+        assert result.threshold_used == 0.2
+        assert result.visible_hive_count == 1
+
+    @responses.activate
     def test_discover_diagnostics_when_pool_nonempty_but_filtered(self, client) -> None:
         # The bug-the-PM-hit shape: pool of 4 candidates, threshold filters
         # all of them out. SDK surfaces the diagnostic so the caller can

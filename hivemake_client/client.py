@@ -350,11 +350,16 @@ class HiveMakeClient:
         if min_score is not None:
             params["min_score"] = str(min_score)
         data = self._request("GET", "/api/agents/discover", params=params, expect=200)
+        # Diagnostic counters shipped in hivemake-server 0.7.0. Pre-0.7.0
+        # responses won't carry them — degrade gracefully (zeros + the
+        # default threshold) rather than raise KeyError. A caller running
+        # this SDK against an older server will see matches but lose the
+        # failure-mode diagnostics; that's a softer failure than crashing.
         return DiscoverAgentsResult(
             matches=[_agent_match_from_payload(m) for m in data["matches"]],
-            candidates_searched=int(data["candidates_searched"]),
-            threshold_used=float(data["threshold_used"]),
-            visible_hive_count=int(data["visible_hive_count"]),
+            candidates_searched=int(data.get("candidates_searched", 0)),
+            threshold_used=float(data.get("threshold_used", 0.2)),
+            visible_hive_count=int(data.get("visible_hive_count", 1)),
         )
 
     # ---------------------------------------------------------------
