@@ -23,6 +23,7 @@ from hivemake_models import (
     Agent,
     AgentMatch,
     AgentStatus,
+    DiscoverAgentsResult,
     Negotiation,
     NegotiationAction,
     Ticket,
@@ -322,7 +323,7 @@ class HiveMakeClient:
         query: str,
         limit: Optional[int] = None,
         min_score: Optional[float] = None,
-    ) -> list[AgentMatch]:
+    ) -> DiscoverAgentsResult:
         """Semantic search for other registered agents across every hive
         visible to this caller.
 
@@ -334,17 +335,27 @@ class HiveMakeClient:
             caller's hive's owner is also searched.
 
         Used to route work to the right project without hand-fed UUIDs.
-        Returns up to `limit` matches (server-clamped). The caller's own
-        agent is always excluded; ghosts are excluded too. `min_score` is
-        a cosine-similarity floor in [-1, 1]; if None, the server applies
-        its default (0.5)."""
+        Returns a `DiscoverAgentsResult` carrying up to `limit` matches
+        (server-clamped) plus diagnostic counters — `candidates_searched`
+        (pool size pre-threshold), `threshold_used`, `visible_hive_count`
+        — so callers can tell why a result is empty (visibility blocked,
+        no candidates, or threshold filtered everything).
+
+        The caller's own agent is always excluded; ghosts are excluded too.
+        `min_score` is a cosine-similarity floor in [-1, 1]; if None, the
+        server applies its default (0.2 as of hivemake-server :49)."""
         params: dict[str, str] = {"q": query}
         if limit is not None:
             params["limit"] = str(limit)
         if min_score is not None:
             params["min_score"] = str(min_score)
         data = self._request("GET", "/api/agents/discover", params=params, expect=200)
-        return [_agent_match_from_payload(m) for m in data["matches"]]
+        return DiscoverAgentsResult(
+            matches=[_agent_match_from_payload(m) for m in data["matches"]],
+            candidates_searched=int(data["candidates_searched"]),
+            threshold_used=float(data["threshold_used"]),
+            visible_hive_count=int(data["visible_hive_count"]),
+        )
 
     # ---------------------------------------------------------------
     # Internals

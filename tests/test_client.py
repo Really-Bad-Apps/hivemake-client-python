@@ -680,15 +680,24 @@ class TestRegister:
 
 class TestDiscoverAgents:
 
+    # Canonical empty response — server returns matches + the three
+    # diagnostic counters even when nothing matched.
+    _EMPTY_RESPONSE = {
+        "matches": [],
+        "candidates_searched": 0,
+        "threshold_used": 0.2,
+        "visible_hive_count": 1,
+    }
+
     @responses.activate
     def test_discover_query_passed(self, client) -> None:
         responses.get(
             f"{BASE}/api/agents/discover",
-            json={"matches": []}, status=200,
+            json=self._EMPTY_RESPONSE, status=200,
         )
         result = client.discover_agents("frontend release engineer")
 
-        assert result == []
+        assert result.matches == []
         assert "q=frontend" in responses.calls[0].request.url
 
     @responses.activate
@@ -697,29 +706,57 @@ class TestDiscoverAgents:
         peer_project = uuid4()
         responses.get(
             f"{BASE}/api/agents/discover",
-            json={"matches": [
-                {
-                    "agent_id": str(peer_id),
-                    "project_id": str(peer_project),
-                    "name": "Boudica",
-                    "description": "frontend release engineer",
-                    "score": 0.92,
-                },
-            ]}, status=200,
+            json={
+                "matches": [
+                    {
+                        "agent_id": str(peer_id),
+                        "project_id": str(peer_project),
+                        "name": "Boudica",
+                        "description": "frontend release engineer",
+                        "score": 0.92,
+                    },
+                ],
+                "candidates_searched": 3,
+                "threshold_used": 0.2,
+                "visible_hive_count": 2,
+            }, status=200,
         )
         result = client.discover_agents("ship the build")
 
-        assert len(result) == 1
-        assert result[0].agent_id == peer_id
-        assert result[0].project_id == peer_project
-        assert result[0].name == "Boudica"
-        assert result[0].score == 0.92
+        assert len(result.matches) == 1
+        assert result.matches[0].agent_id == peer_id
+        assert result.matches[0].project_id == peer_project
+        assert result.matches[0].name == "Boudica"
+        assert result.matches[0].score == 0.92
+        # Diagnostic counters parsed off the wire.
+        assert result.candidates_searched == 3
+        assert result.threshold_used == 0.2
+        assert result.visible_hive_count == 2
+
+    @responses.activate
+    def test_discover_diagnostics_when_pool_nonempty_but_filtered(self, client) -> None:
+        # The bug-the-PM-hit shape: pool of 4 candidates, threshold filters
+        # all of them out. SDK surfaces the diagnostic so the caller can
+        # tell why matches is empty.
+        responses.get(
+            f"{BASE}/api/agents/discover",
+            json={
+                "matches": [],
+                "candidates_searched": 4,
+                "threshold_used": 0.2,
+                "visible_hive_count": 5,
+            }, status=200,
+        )
+        result = client.discover_agents("materia")
+        assert result.matches == []
+        assert result.candidates_searched == 4
+        assert result.visible_hive_count == 5
 
     @responses.activate
     def test_discover_limit_passed_as_query_param(self, client) -> None:
         responses.get(
             f"{BASE}/api/agents/discover",
-            json={"matches": []}, status=200,
+            json=self._EMPTY_RESPONSE, status=200,
         )
         client.discover_agents("foo", limit=5)
         assert "limit=5" in responses.calls[0].request.url
@@ -728,7 +765,7 @@ class TestDiscoverAgents:
     def test_discover_min_score_omitted_when_none(self, client) -> None:
         responses.get(
             f"{BASE}/api/agents/discover",
-            json={"matches": []}, status=200,
+            json=self._EMPTY_RESPONSE, status=200,
         )
         client.discover_agents("foo")
         assert "min_score" not in responses.calls[0].request.url
@@ -737,7 +774,7 @@ class TestDiscoverAgents:
     def test_discover_min_score_passed_when_set(self, client) -> None:
         responses.get(
             f"{BASE}/api/agents/discover",
-            json={"matches": []}, status=200,
+            json=self._EMPTY_RESPONSE, status=200,
         )
         client.discover_agents("foo", min_score=0.3)
         assert "min_score=0.3" in responses.calls[0].request.url
