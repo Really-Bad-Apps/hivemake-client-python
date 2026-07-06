@@ -542,6 +542,23 @@ class TestActions:
         assert b'"action": "info_provided"' in responses.calls[0].request.body
 
     @responses.activate
+    def test_add_note(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid),
+                "negotiation": {"id": str(uuid4()), "action": "note"},
+            },
+            status=201,
+        )
+        ticket = client.add_note(tid, message="fyi shipping a fix")
+        assert ticket.id == tid
+        body = responses.calls[0].request.body
+        assert b'"action": "note"' in body
+        assert b'"message": "fyi shipping a fix"' in body
+
+    @responses.activate
     def test_close(self, client) -> None:
         tid = uuid4()
         responses.post(

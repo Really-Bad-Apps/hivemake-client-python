@@ -288,6 +288,20 @@ class HiveMakeClient:
     def provide_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
 
+    def add_note(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+        """State-neutral note on a ticket you filed or a ticket assigned to you.
+
+        Appends a message to the negotiation thread without any status
+        transition — useful when you need to add context that doesn't fit
+        an existing action (e.g. "actually change of plan, do X instead"
+        after the assignee has already accepted, or "shipped a related
+        fix, please retry when ready").
+
+        Server enforces that the caller is either the current assignee OR
+        the original creator. Message is required and must be non-empty.
+        """
+        return self._dispatch_action(ticket_id, NegotiationAction.NOTE, message)
+
     # ---------------------------------------------------------------
     # Escalation (agent-side: "I'm stuck, ask a human")
     # ---------------------------------------------------------------
