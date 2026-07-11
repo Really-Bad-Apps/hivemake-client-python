@@ -3,6 +3,7 @@
 Uses the `responses` library to mock the HiveMake server. No real network.
 """
 
+import json
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -875,6 +876,151 @@ class TestDiscoverAgents:
         )
         with pytest.raises(HiveMakeForbidden):
             client.discover_agents("anything")
+
+
+# ---------------------------------------------------------------------------
+# Knowledge (cognee-backed recall)
+# ---------------------------------------------------------------------------
+
+class TestFindSimilarTickets:
+
+    @responses.activate
+    def test_empty_response(self, client) -> None:
+        """Server returns [] when there are no matches OR when the kill
+        switch is off OR when cognee is temporarily unreachable — the
+        client surfaces them all as an empty list."""
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets", json=[], status=200,
+        )
+        result = client.find_similar_tickets("pool exhaustion")
+        assert result == []
+
+    @responses.activate
+    def test_parses_matches(self, client) -> None:
+        ticket_id = uuid4()
+        hive_id = uuid4()
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets",
+            json=[
+                {
+                    "ticket_id": str(ticket_id),
+                    "hive_id": str(hive_id),
+                    "ticket_type": "bug",
+                    "final_status": "resolved",
+                    "score": 0.87,
+                    "snippet": "raised pool size to 200",
+                    "project": "auth-svc",
+                },
+            ], status=200,
+        )
+        result = client.find_similar_tickets("connection pool")
+
+        assert len(result) == 1
+        match = result[0]
+        assert match.ticket_id == ticket_id
+        assert match.hive_id == hive_id
+        assert match.ticket_type == "bug"
+        assert match.final_status == "resolved"
+        assert match.score == 0.87
+        assert match.snippet == "raised pool size to 200"
+        assert match.project == "auth-svc"
+
+    @responses.activate
+    def test_parses_match_with_null_project(self, client) -> None:
+        """Hive-level tickets have no project. The client must accept
+        `project: null` (or missing) without crashing."""
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets",
+            json=[
+                {
+                    "ticket_id": str(uuid4()),
+                    "hive_id": str(uuid4()),
+                    "ticket_type": "task",
+                    "final_status": "closed",
+                    "score": 0.5,
+                    "snippet": "operational note",
+                    "project": None,
+                },
+            ], status=200,
+        )
+        result = client.find_similar_tickets("q")
+        assert result[0].project is None
+
+    @responses.activate
+    def test_query_sent_in_body(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets", json=[], status=200,
+        )
+        client.find_similar_tickets("how did we fix pool exhaustion")
+        req = responses.calls[0].request
+        assert req.method == "POST"
+        assert req.url.endswith("/api/knowledge/similar-tickets")
+        body = json.loads(req.body)
+        assert body["query"] == "how did we fix pool exhaustion"
+        assert body["limit"] == 10  # default
+
+    @responses.activate
+    def test_ticket_type_forwarded(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets", json=[], status=200,
+        )
+        client.find_similar_tickets("q", ticket_type="bug", limit=5)
+        body = json.loads(responses.calls[0].request.body)
+        assert body["ticket_type"] == "bug"
+        assert body["limit"] == 5
+
+    @responses.activate
+    def test_ticket_type_omitted_when_none(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/similar-tickets", json=[], status=200,
+        )
+        client.find_similar_tickets("q")
+        body = json.loads(responses.calls[0].request.body)
+        assert "ticket_type" not in body
+
+
+class TestRecallKnowledge:
+
+    @responses.activate
+    def test_returns_synthesized_answer(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/recall",
+            json={"answer": "the fix was to raise the pool size"}, status=200,
+        )
+        result = client.recall_knowledge("what was the fix")
+        assert result == "the fix was to raise the pool size"
+
+    @responses.activate
+    def test_empty_answer(self, client) -> None:
+        """Kill switch OFF / cognee down / no relevant knowledge — server
+        returns {"answer": ""}, client passes it through verbatim."""
+        responses.post(
+            f"{BASE}/api/knowledge/recall",
+            json={"answer": ""}, status=200,
+        )
+        result = client.recall_knowledge("anything")
+        assert result == ""
+
+    @responses.activate
+    def test_answer_missing_treated_as_empty(self, client) -> None:
+        """Defensive: if the server response somehow omits `answer`, don't
+        crash — treat as empty. Matches the graceful-degrade posture."""
+        responses.post(
+            f"{BASE}/api/knowledge/recall", json={}, status=200,
+        )
+        result = client.recall_knowledge("q")
+        assert result == ""
+
+    @responses.activate
+    def test_query_sent_in_body(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/recall",
+            json={"answer": "x"}, status=200,
+        )
+        client.recall_knowledge("what is postgres pool exhaustion")
+        req = responses.calls[0].request
+        body = json.loads(req.body)
+        assert body == {"query": "what is postgres pool exhaustion"}
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from hivemake_models import (
     AgentMatch,
     AgentStatus,
     DiscoverAgentsResult,
+    KnowledgeMatch,
     Negotiation,
     NegotiationAction,
     Ticket,
@@ -386,6 +387,60 @@ class HiveMakeClient:
         )
 
     # ---------------------------------------------------------------
+    # Knowledge (cognee-backed recall over resolved-ticket history)
+    # ---------------------------------------------------------------
+
+    def find_similar_tickets(
+        self,
+        query: str,
+        ticket_type: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[KnowledgeMatch]:
+        """Recall past resolved tickets similar to `query`.
+
+        Searches the caller's visible-hive set (own hive + `open` hives +
+        `owner_scope` hives where the owner matches — same visibility as
+        `discover_agents`). Returns a list of `KnowledgeMatch` records
+        ordered by relevance score (higher = better within THIS response;
+        do not compare scores across separate calls).
+
+        Empty list when there are no matches OR when the server-side kill
+        switch is off OR when cognee is temporarily unreachable — the
+        server never surfaces cognee errors as HTTP failures into the
+        agent's triage flow (graceful degrade). Treat empty as "no
+        actionable knowledge here, proceed with normal triage."
+
+        `ticket_type` filters results to a specific type (bug, task, etc.);
+        `limit` caps returned matches (server enforces 1..50).
+        """
+        body: dict[str, Any] = {"query": query, "limit": limit}
+        if ticket_type is not None:
+            body["ticket_type"] = ticket_type
+        data = self._request(
+            "POST", "/api/knowledge/similar-tickets",
+            json_body=body, expect=200,
+        )
+        # Server returns a bare list, not an envelope object — matches
+        # blueprints/knowledge.py:SimilarTicketsResource.post.
+        return [_knowledge_match_from_payload(m) for m in data]
+
+    def recall_knowledge(self, query: str) -> str:
+        """Ask a natural-language question over resolved-ticket knowledge.
+
+        Returns a synthesized answer string. Empty string when there is
+        no relevant knowledge OR the kill switch is off OR cognee is
+        temporarily unreachable. The answer is a hint, not a source of
+        truth — cognee's LLM synthesis can hallucinate; do not act on
+        the answer text without independent verification.
+        """
+        body = {"query": query}
+        data = self._request(
+            "POST", "/api/knowledge/recall",
+            json_body=body, expect=200,
+        )
+        return data.get("answer", "")
+
+    # ---------------------------------------------------------------
     # Internals
     # ---------------------------------------------------------------
 
@@ -442,6 +497,23 @@ def _agent_match_from_payload(payload: dict[str, Any]) -> AgentMatch:
         name=payload["name"],
         description=payload.get("description") or "",
         score=float(payload["score"]),
+    )
+
+
+def _knowledge_match_from_payload(payload: dict[str, Any]) -> KnowledgeMatch:
+    """Parse a similar-tickets response element into a KnowledgeMatch.
+
+    The server serializes KnowledgeMatch dataclasses via
+    `blueprints/_serialize.py:serialize` which stringifies top-level UUIDs;
+    coerce them back into `uuid.UUID` here to match the dataclass hint."""
+    return KnowledgeMatch(
+        ticket_id=UUID(payload["ticket_id"]) if isinstance(payload["ticket_id"], str) else payload["ticket_id"],
+        hive_id=UUID(payload["hive_id"]) if isinstance(payload["hive_id"], str) else payload["hive_id"],
+        ticket_type=payload["ticket_type"],
+        final_status=payload["final_status"],
+        score=float(payload["score"]),
+        snippet=payload["snippet"],
+        project=payload.get("project"),
     )
 
 
