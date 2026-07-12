@@ -696,6 +696,37 @@ class TestRegister:
             client.register("anything that meets the min length")
 
 
+class TestMe:
+
+    @responses.activate
+    def test_me_returns_agent(self, client) -> None:
+        agent_id = uuid4()
+        responses.get(
+            f"{BASE}/api/agents/me",
+            json={"agent": _agent_payload(agent_id=agent_id)},
+            status=200,
+        )
+        agent = client.me()
+        assert agent.id == agent_id
+        assert agent.registered_at == 1700000010
+
+    @responses.activate
+    def test_me_returns_ghost_agent_with_null_registered_at(self, client) -> None:
+        agent_id = uuid4()
+        payload = _agent_payload(agent_id=agent_id)
+        payload["registered_at"] = None
+        payload["description"] = None
+        responses.get(
+            f"{BASE}/api/agents/me",
+            json={"agent": payload},
+            status=200,
+        )
+        agent = client.me()
+        assert agent.id == agent_id
+        assert agent.registered_at is None
+        assert agent.description is None
+
+
 class TestDiscoverAgents:
 
     # Canonical empty response — server returns matches + four diagnostic

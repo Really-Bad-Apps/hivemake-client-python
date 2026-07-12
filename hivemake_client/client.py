@@ -333,6 +333,17 @@ class HiveMakeClient:
         data = self._request("POST", "/api/agents/register", json_body=body, expect=200)
         return RegistrationResult(agent=_agent_from_payload(data["agent"]))
 
+    def me(self) -> Agent:
+        """Return the calling agent's own record.
+
+        Callable pre-registration (unlike most other methods), so downstream
+        MCP surfaces can route on the caller's identity BEFORE handing them
+        registration instructions. `registered_at` is None on the returned
+        Agent for pre-registration callers.
+        """
+        data = self._request("GET", "/api/agents/me", expect=200)
+        return _agent_from_payload(data["agent"])
+
     def discover_agents(
         self,
         query: str,
