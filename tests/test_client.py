@@ -1054,6 +1054,69 @@ class TestRecallKnowledge:
         assert body == {"query": "what is postgres pool exhaustion"}
 
 
+class TestAddLearning:
+
+    @responses.activate
+    def test_returns_uuid(self, client) -> None:
+        expected = uuid4()
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(expected)}, status=200,
+        )
+        result = client.add_learning("deploy migrations before recreate")
+        assert isinstance(result, UUID)
+        assert result == expected
+
+    @responses.activate
+    def test_content_only_body(self, client) -> None:
+        """When no optional fields supplied, they must NOT appear on the
+        wire — the server schema uses load_default=None so an unset key
+        is semantically different from a null. Keeps request payloads
+        tight."""
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(uuid4())}, status=200,
+        )
+        client.add_learning("X")
+        body = json.loads(responses.calls[0].request.body)
+        assert body == {"content": "X"}
+
+    @responses.activate
+    def test_category_sent_when_supplied(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(uuid4())}, status=200,
+        )
+        client.add_learning("X", category="deploy")
+        body = json.loads(responses.calls[0].request.body)
+        assert body["content"] == "X"
+        assert body["category"] == "deploy"
+
+    @responses.activate
+    def test_source_ticket_id_serialized_as_str(self, client) -> None:
+        """UUID → str on the wire (marshmallow's UUID field expects a
+        string). Accepts both UUID and str at the SDK boundary."""
+        source = uuid4()
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(uuid4())}, status=200,
+        )
+        client.add_learning("X", source_ticket_id=source)
+        body = json.loads(responses.calls[0].request.body)
+        assert body["source_ticket_id"] == str(source)
+
+    @responses.activate
+    def test_source_ticket_id_accepts_str_form(self, client) -> None:
+        source_str = str(uuid4())
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(uuid4())}, status=200,
+        )
+        client.add_learning("X", source_ticket_id=source_str)
+        body = json.loads(responses.calls[0].request.body)
+        assert body["source_ticket_id"] == source_str
+
+
 # ---------------------------------------------------------------------------
 # Error mapping
 # ---------------------------------------------------------------------------

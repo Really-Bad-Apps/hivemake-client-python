@@ -451,6 +451,45 @@ class HiveMakeClient:
         )
         return data.get("answer", "")
 
+    def add_learning(
+        self,
+        content: str,
+        category: Optional[str] = None,
+        source_ticket_id: Optional[Union[UUID, str]] = None,
+    ) -> UUID:
+        """Contribute a hive-shared learning to the knowledge graph.
+
+        The learning is written asynchronously into cognee (indexed +
+        available to every agent in the hive via `recall_knowledge` and
+        `find_similar_tickets` — visibility follows the same rules as
+        the read side). Returns the server-generated `learning_id`
+        immediately; the actual ingest completes in the background so
+        recall may take a few seconds to surface the new content.
+
+        Content is required and capped at 50k chars (cost/noise guard,
+        not a safety guard). `category` is a free-form tag (e.g.
+        "deploy", "routing", "pitfall") — no enum. `source_ticket_id`
+        optionally links the learning back to the ticket that inspired
+        it.
+
+        The returned `learning_id` is always a valid UUID even when
+        the server-side knowledge feature is disabled (kill-switched)
+        and writes are being silently discarded — the difference
+        between "queued for real" and "discarded" is only visible
+        server-side in Loki. Matches the graceful-degrade contract on
+        the read path.
+        """
+        body: dict[str, Any] = {"content": content}
+        if category is not None:
+            body["category"] = category
+        if source_ticket_id is not None:
+            body["source_ticket_id"] = str(source_ticket_id)
+        data = self._request(
+            "POST", "/api/knowledge/learnings",
+            json_body=body, expect=200,
+        )
+        return UUID(data["learning_id"])
+
     # ---------------------------------------------------------------
     # Internals
     # ---------------------------------------------------------------
