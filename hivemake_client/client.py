@@ -27,6 +27,7 @@ from hivemake_models import (
     KnowledgeMatch,
     Negotiation,
     NegotiationAction,
+    OutboundTicket,
     Ticket,
     TicketHistory,
     TicketPriority,
@@ -123,7 +124,7 @@ class HiveMakeClient:
     # Tickets
     # ---------------------------------------------------------------
 
-    def file_ticket(self, request: FileTicketRequest) -> Ticket:
+    def file_ticket(self, request: FileTicketRequest) -> OutboundTicket:
         """File a ticket against a target project.
 
         Same-hive routing is always allowed. Cross-hive routing
@@ -132,6 +133,13 @@ class HiveMakeClient:
         cross-hive attempts raise HiveMakeForbidden with
         `.error == "target_hive_not_visible"`. The ticket lives in the
         caller's hive regardless of routing target.
+
+        Returns an `OutboundTicket` — the ticket plus a
+        `waiting_on_autonomous` polling hint about the assignee. If
+        True, the assignee runs on schedule and starts working
+        immediately, so the caller can poll `get_ticket` right away;
+        if False, the assignee needs a human to drive them and
+        polling before that nudge is wasted.
         """
         body = {
             "target_project_id": str(request.target_project_id),
@@ -142,7 +150,7 @@ class HiveMakeClient:
             "message": request.message,
         }
         data = self._request("POST", "/api/tickets", json_body=body, expect=201)
-        return _ticket_from_payload(data["ticket"])
+        return _outbound_from_payload(data)
 
     def get_ticket(self, ticket_id: Union[UUID, str]) -> TicketDetail:
         """Fetch a single ticket plus its full negotiation thread + history.
@@ -194,13 +202,18 @@ class HiveMakeClient:
         self,
         status: Optional[Union[TicketStatus, str]] = None,
         include_terminal: bool = False,
-    ) -> list[Ticket]:
+    ) -> list[OutboundTicket]:
         """List tickets the calling agent filed (the agent's outbox).
 
         Same status / include_terminal semantics as `list_inbox`: defaults to
         active-only (open + accepted), explicit `status=` takes precedence
         over `include_terminal`. ESCALATED tickets the agent filed against
         someone else's project are visible via `status=TicketStatus.ESCALATED`.
+
+        Returns `OutboundTicket` rows — each carries the ticket plus a
+        `waiting_on_autonomous` polling hint about that ticket's current
+        assignee. Callers polling for a response can prioritize the
+        rows where the assignee is autonomous.
         """
         params: dict[str, str] = {}
         if status is not None:
@@ -208,7 +221,7 @@ class HiveMakeClient:
         if include_terminal:
             params["include_terminal"] = "true"
         data = self._request("GET", "/api/tickets/outbox", params=params, expect=200)
-        return [_ticket_from_payload(t) for t in data["tickets"]]
+        return [_outbound_from_payload(row) for row in data["tickets"]]
 
     # ---------------------------------------------------------------
     # Negotiation actions
@@ -235,14 +248,20 @@ class HiveMakeClient:
         returns 422)."""
         return self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
 
-    def reopen(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+    def reopen(self, ticket_id: Union[UUID, str], message: str) -> OutboundTicket:
         """Creator disputes a resolution. RESOLVED → OPEN.
 
         Clears the ticket's `resolution` field; the negotiation trail keeps
         the full history. `message` is required and must be non-empty —
         the assignee needs to know why the resolution was rejected.
-        Unbounded: a ticket can be reopened any number of times."""
-        return self._dispatch_action(ticket_id, NegotiationAction.REOPENED, message)
+        Unbounded: a ticket can be reopened any number of times.
+
+        Returns `OutboundTicket` — reopen puts the ticket back on the
+        assignee, so `waiting_on_autonomous` tells the caller whether
+        to poll immediately."""
+        return self._dispatch_outbound_action(
+            ticket_id, NegotiationAction.REOPENED, message,
+        )
 
     def close(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """Assignee marks the ticket no-fault terminal (obsolete/duplicate/won't-fix).
@@ -265,13 +284,17 @@ class HiveMakeClient:
         ticket_id: Union[UUID, str],
         target_project_id: Union[UUID, str],
         message: str = "",
-    ) -> Ticket:
+    ) -> OutboundTicket:
         """Re-route a ticket to a different project. The new target is
         gated by the same visibility check as file_ticket: same-hive is
         always allowed; cross-hive succeeds only when the target hive's
         visibility permits the ticket's current hive. Other cross-hive
         redirects raise HiveMakeForbidden with
-        `.error == "target_hive_not_visible"`."""
+        `.error == "target_hive_not_visible"`.
+
+        Returns `OutboundTicket` — after redirect the caller (previous
+        assignee) is now waiting on the NEW assignee, so the returned
+        `waiting_on_autonomous` reflects that agent's mode."""
         body = {
             "action": NegotiationAction.REDIRECTED.value,
             "target_project_id": str(target_project_id),
@@ -281,10 +304,21 @@ class HiveMakeClient:
             "POST", f"/api/tickets/{ticket_id}/negotiations",
             json_body=body, expect=201,
         )
-        return _ticket_from_payload(data["ticket"])
+        return _outbound_from_payload(data)
 
-    def request_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        return self._dispatch_action(ticket_id, NegotiationAction.INFO_REQUESTED, message)
+    def request_info(
+        self, ticket_id: Union[UUID, str], message: str = "",
+    ) -> OutboundTicket:
+        """Assignee asks the creator for clarification.
+        ACCEPTED | IN_PROGRESS → INFO_REQUESTED.
+
+        Returns `OutboundTicket` — for request_info the next responder
+        is the CREATOR (not the assignee), so `waiting_on_autonomous`
+        reflects the creator's mode: whether they'll pull the info
+        request on schedule or need a human nudge."""
+        return self._dispatch_outbound_action(
+            ticket_id, NegotiationAction.INFO_REQUESTED, message,
+        )
 
     def provide_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
@@ -507,6 +541,22 @@ class HiveMakeClient:
         )
         return _ticket_from_payload(data["ticket"])
 
+    def _dispatch_outbound_action(
+        self,
+        ticket_id: Union[UUID, str],
+        action: NegotiationAction,
+        message: str,
+    ) -> OutboundTicket:
+        """Dispatch an outbound-shaped negotiation action (reopen /
+        request_info). Parses the enriched `{ticket, waiting_on_autonomous}`
+        response into an `OutboundTicket`."""
+        body = {"action": action.value, "message": message}
+        data = self._request(
+            "POST", f"/api/tickets/{ticket_id}/negotiations",
+            json_body=body, expect=201,
+        )
+        return _outbound_from_payload(data)
+
     def _request(
         self,
         method: str,
@@ -621,6 +671,17 @@ def _ticket_from_payload(payload: dict[str, Any]) -> Ticket:
     out["priority"] = TicketPriority(out["priority"])
     out["status"] = TicketStatus(out["status"])
     return Ticket(**out)
+
+
+def _outbound_from_payload(payload: dict[str, Any]) -> OutboundTicket:
+    """Parse the `{ticket, waiting_on_autonomous, ...}` wrapper the
+    outbound endpoints return. Extra top-level fields (e.g. `negotiation`
+    on the negotiations endpoint response) are ignored — callers that
+    need them parse the raw dict separately."""
+    return OutboundTicket(
+        ticket=_ticket_from_payload(payload["ticket"]),
+        waiting_on_autonomous=bool(payload["waiting_on_autonomous"]),
+    )
 
 
 def _raise_for_status(resp: requests.Response) -> None:

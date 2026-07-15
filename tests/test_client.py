@@ -112,11 +112,14 @@ class TestFileTicket:
         target_id = uuid4()
         responses.post(
             f"{BASE}/api/tickets",
-            json={"ticket": _ticket_payload(ticket_id=ticket_id)},
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "waiting_on_autonomous": False,
+            },
             status=201,
         )
 
-        ticket = client.file_ticket(FileTicketRequest(
+        outbound = client.file_ticket(FileTicketRequest(
             target_project_id=target_id,
             ticket_type=TicketType.BUG,
             title="X",
@@ -124,8 +127,9 @@ class TestFileTicket:
             priority=TicketPriority.HIGH,
         ))
 
-        assert isinstance(ticket.id, UUID)
-        assert ticket.id == ticket_id
+        assert isinstance(outbound.ticket.id, UUID)
+        assert outbound.ticket.id == ticket_id
+        assert outbound.waiting_on_autonomous is False
         # Request body sent the wire-strings for enums.
         sent = responses.calls[0].request.body
         assert b'"ticket_type": "bug"' in sent
@@ -136,7 +140,10 @@ class TestFileTicket:
     def test_file_ticket_accepts_string_enums(self, client) -> None:
         responses.post(
             f"{BASE}/api/tickets",
-            json={"ticket": _ticket_payload(ticket_id=uuid4())},
+            json={
+                "ticket": _ticket_payload(ticket_id=uuid4()),
+                "waiting_on_autonomous": False,
+            },
             status=201,
         )
 
@@ -151,6 +158,27 @@ class TestFileTicket:
         sent = responses.calls[0].request.body
         assert b'"ticket_type": "bug"' in sent
         assert b'"priority": "medium"' in sent
+
+    @responses.activate
+    def test_file_ticket_surfaces_autonomous_assignee(self, client) -> None:
+        """Server sets waiting_on_autonomous=True when the assignee is
+        autonomous — client passes it through on the OutboundTicket."""
+        responses.post(
+            f"{BASE}/api/tickets",
+            json={
+                "ticket": _ticket_payload(ticket_id=uuid4()),
+                "waiting_on_autonomous": True,
+            },
+            status=201,
+        )
+
+        outbound = client.file_ticket(FileTicketRequest(
+            target_project_id=uuid4(),
+            ticket_type=TicketType.TASK,
+            title="X", description="Y",
+        ))
+
+        assert outbound.waiting_on_autonomous is True
 
     @responses.activate
     def test_target_project_not_found(self, client) -> None:
@@ -337,13 +365,21 @@ class TestListOutbox:
         ids = [uuid4(), uuid4()]
         responses.get(
             f"{BASE}/api/tickets/outbox",
-            json={"tickets": [_ticket_payload(ticket_id=i) for i in ids]},
+            json={"tickets": [
+                {"ticket": _ticket_payload(ticket_id=ids[0]),
+                 "waiting_on_autonomous": True},
+                {"ticket": _ticket_payload(ticket_id=ids[1]),
+                 "waiting_on_autonomous": False},
+            ]},
             status=200,
         )
 
         result = client.list_outbox()
-        assert [t.id for t in result] == ids
-        assert all(isinstance(t.id, UUID) for t in result)
+        assert [row.ticket.id for row in result] == ids
+        assert all(isinstance(row.ticket.id, UUID) for row in result)
+        # Autonomy hint per row rides through — one True (autonomous
+        # assignee, poll now), one False (manual, don't poll yet).
+        assert [row.waiting_on_autonomous for row in result] == [True, False]
 
     @responses.activate
     def test_status_filter_passed_as_query_param(self, client) -> None:
@@ -473,11 +509,13 @@ class TestActions:
             json={
                 "ticket": _ticket_payload(ticket_id=tid, status="open"),
                 "negotiation": {"id": str(uuid4()), "action": "reopened"},
+                "waiting_on_autonomous": True,
             },
             status=201,
         )
-        ticket = client.reopen(tid, message="regression in panel-3")
-        assert ticket.id == tid
+        outbound = client.reopen(tid, message="regression in panel-3")
+        assert outbound.ticket.id == tid
+        assert outbound.waiting_on_autonomous is True
         body = responses.calls[0].request.body
         assert b'"action": "reopened"' in body
         assert b'"message": "regression in panel-3"' in body
@@ -506,10 +544,13 @@ class TestActions:
             json={
                 "ticket": _ticket_payload(ticket_id=tid, status="open"),
                 "negotiation": {"id": str(uuid4()), "action": "redirected"},
+                "waiting_on_autonomous": False,
             },
             status=201,
         )
-        client.redirect(tid, target_project_id=target, message="wrong team")
+        outbound = client.redirect(tid, target_project_id=target, message="wrong team")
+        assert outbound.ticket.id == tid
+        assert outbound.waiting_on_autonomous is False
         body = responses.calls[0].request.body
         assert b'"action": "redirected"' in body
         assert f'"target_project_id": "{target}"'.encode() in body
@@ -522,10 +563,14 @@ class TestActions:
             json={
                 "ticket": _ticket_payload(ticket_id=tid),
                 "negotiation": {"id": str(uuid4()), "action": "info_requested"},
+                "waiting_on_autonomous": True,
             },
             status=201,
         )
-        client.request_info(tid, message="repro steps?")
+        outbound = client.request_info(tid, message="repro steps?")
+        # request_info's waiting_on flag is about the CREATOR (the
+        # next responder), not the assignee.
+        assert outbound.waiting_on_autonomous is True
         assert b'"action": "info_requested"' in responses.calls[0].request.body
 
     @responses.activate
