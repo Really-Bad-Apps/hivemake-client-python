@@ -205,21 +205,50 @@ class TestListInbox:
 
     @responses.activate
     def test_empty_inbox(self, client) -> None:
-        responses.get(f"{BASE}/api/tickets", json={"tickets": []}, status=200)
-        assert client.list_inbox() == []
+        responses.get(
+            f"{BASE}/api/tickets",
+            json={"tickets": [], "too_many": False, "count": 0, "message": None},
+            status=200,
+        )
+        result = client.list_inbox()
+        assert result.tickets == []
+        assert result.too_many is False
+        assert result.count == 0
+        assert result.message is None
 
     @responses.activate
     def test_returns_tickets(self, client) -> None:
         ids = [uuid4(), uuid4()]
         responses.get(
             f"{BASE}/api/tickets",
-            json={"tickets": [_ticket_payload(ticket_id=i) for i in ids]},
+            json={
+                "tickets": [_ticket_payload(ticket_id=i) for i in ids],
+                "too_many": False, "count": 2, "message": None,
+            },
             status=200,
         )
 
         result = client.list_inbox()
-        assert [t.id for t in result] == ids
-        assert all(isinstance(t.id, UUID) for t in result)
+        assert [t.id for t in result.tickets] == ids
+        assert all(isinstance(t.id, UUID) for t in result.tickets)
+        assert result.count == 2
+        assert result.too_many is False
+
+    @responses.activate
+    def test_overflow_response(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/tickets",
+            json={
+                "tickets": [], "too_many": True, "count": 87,
+                "message": "Narrow further.",
+            },
+            status=200,
+        )
+        result = client.list_inbox()
+        assert result.tickets == []
+        assert result.too_many is True
+        assert result.count == 87
+        assert result.message == "Narrow further."
 
     @responses.activate
     def test_status_filter_passed_as_query_param(self, client) -> None:
@@ -250,6 +279,19 @@ class TestListInbox:
         url = responses.calls[0].request.url
         assert "status=open" in url
         assert "include_terminal=true" in url
+
+    @responses.activate
+    def test_q_passed_as_query_param(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets", json={"tickets": []}, status=200)
+        client.list_inbox(q="deploy")
+        assert "q=deploy" in responses.calls[0].request.url
+
+    @responses.activate
+    def test_q_empty_not_sent(self, client) -> None:
+        """None / empty q should not appear on the wire."""
+        responses.get(f"{BASE}/api/tickets", json={"tickets": []}, status=200)
+        client.list_inbox(q="")
+        assert "q=" not in responses.calls[0].request.url
 
     @responses.activate
     def test_invalid_status_raises(self, client) -> None:
@@ -357,29 +399,55 @@ class TestListOutbox:
 
     @responses.activate
     def test_empty_outbox(self, client) -> None:
-        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
-        assert client.list_outbox() == []
+        responses.get(
+            f"{BASE}/api/tickets/outbox",
+            json={"tickets": [], "too_many": False, "count": 0, "message": None},
+            status=200,
+        )
+        result = client.list_outbox()
+        assert result.tickets == []
+        assert result.too_many is False
+        assert result.count == 0
 
     @responses.activate
     def test_returns_tickets(self, client) -> None:
         ids = [uuid4(), uuid4()]
         responses.get(
             f"{BASE}/api/tickets/outbox",
-            json={"tickets": [
-                {"ticket": _ticket_payload(ticket_id=ids[0]),
-                 "waiting_on_autonomous": True},
-                {"ticket": _ticket_payload(ticket_id=ids[1]),
-                 "waiting_on_autonomous": False},
-            ]},
+            json={
+                "tickets": [
+                    {"ticket": _ticket_payload(ticket_id=ids[0]),
+                     "waiting_on_autonomous": True},
+                    {"ticket": _ticket_payload(ticket_id=ids[1]),
+                     "waiting_on_autonomous": False},
+                ],
+                "too_many": False, "count": 2, "message": None,
+            },
             status=200,
         )
 
         result = client.list_outbox()
-        assert [row.ticket.id for row in result] == ids
-        assert all(isinstance(row.ticket.id, UUID) for row in result)
+        assert [row.ticket.id for row in result.tickets] == ids
+        assert all(isinstance(row.ticket.id, UUID) for row in result.tickets)
         # Autonomy hint per row rides through — one True (autonomous
         # assignee, poll now), one False (manual, don't poll yet).
-        assert [row.waiting_on_autonomous for row in result] == [True, False]
+        assert [row.waiting_on_autonomous for row in result.tickets] == [True, False]
+        assert result.count == 2
+
+    @responses.activate
+    def test_overflow_response(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/tickets/outbox",
+            json={
+                "tickets": [], "too_many": True, "count": 58,
+                "message": "Filter with q.",
+            },
+            status=200,
+        )
+        result = client.list_outbox()
+        assert result.tickets == []
+        assert result.too_many is True
+        assert result.count == 58
 
     @responses.activate
     def test_status_filter_passed_as_query_param(self, client) -> None:
@@ -409,6 +477,12 @@ class TestListOutbox:
         url = responses.calls[0].request.url
         assert "status=open" in url
         assert "include_terminal=true" in url
+
+    @responses.activate
+    def test_q_passed_as_query_param(self, client) -> None:
+        responses.get(f"{BASE}/api/tickets/outbox", json={"tickets": []}, status=200)
+        client.list_outbox(q="deploy")
+        assert "q=deploy" in responses.calls[0].request.url
 
 
 # ---------------------------------------------------------------------------

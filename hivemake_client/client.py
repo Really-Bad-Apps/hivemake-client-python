@@ -28,8 +28,10 @@ from hivemake_models import (
     Negotiation,
     NegotiationAction,
     OutboundTicket,
+    OutboundTicketListResult,
     Ticket,
     TicketHistory,
+    TicketListResult,
     TicketPriority,
     TicketStatus,
     TicketType,
@@ -177,7 +179,8 @@ class HiveMakeClient:
         self,
         status: Optional[Union[TicketStatus, str]] = None,
         include_terminal: bool = False,
-    ) -> list[Ticket]:
+        q: Optional[str] = None,
+    ) -> TicketListResult:
         """List tickets in the agent's inbox.
 
         Default returns only active tickets (open + accepted). Pass an explicit
@@ -189,39 +192,62 @@ class HiveMakeClient:
         a ticket, it's in human hands until a recovery action moves it back to
         ACCEPTED, at which point it reappears in the default inbox. To see your
         own escalations explicitly, pass `status=TicketStatus.ESCALATED`.
+
+        `q` is an optional substring filter; the server ILIKE-matches it
+        against title, description, and ticket-id prefix.
+
+        Returns `TicketListResult`. If the query matches more rows than the
+        server's response ceiling, `too_many=True`, `tickets` is empty, and
+        `message` carries an advisory to supply/narrow `q`. Otherwise
+        `too_many=False` and `tickets` carries the matches.
         """
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = str(status)
         if include_terminal:
             params["include_terminal"] = "true"
+        if q:
+            params["q"] = q
         data = self._request("GET", "/api/tickets", params=params, expect=200)
-        return [_ticket_from_payload(t) for t in data["tickets"]]
+        return TicketListResult(
+            tickets=[_ticket_from_payload(t) for t in data["tickets"]],
+            too_many=bool(data.get("too_many", False)),
+            count=int(data.get("count", 0)),
+            message=data.get("message"),
+        )
 
     def list_outbox(
         self,
         status: Optional[Union[TicketStatus, str]] = None,
         include_terminal: bool = False,
-    ) -> list[OutboundTicket]:
+        q: Optional[str] = None,
+    ) -> OutboundTicketListResult:
         """List tickets the calling agent filed (the agent's outbox).
 
-        Same status / include_terminal semantics as `list_inbox`: defaults to
-        active-only (open + accepted), explicit `status=` takes precedence
-        over `include_terminal`. ESCALATED tickets the agent filed against
-        someone else's project are visible via `status=TicketStatus.ESCALATED`.
+        Same status / include_terminal / q semantics as `list_inbox`. Rows
+        are `OutboundTicket` — each carries the ticket plus a
+        `waiting_on_autonomous` polling hint about the current assignee.
+        Callers polling for a response can prioritize the rows where the
+        assignee is autonomous.
 
-        Returns `OutboundTicket` rows — each carries the ticket plus a
-        `waiting_on_autonomous` polling hint about that ticket's current
-        assignee. Callers polling for a response can prioritize the
-        rows where the assignee is autonomous.
+        Returns `OutboundTicketListResult` — same overflow contract as
+        `list_inbox`: on overflow, `too_many=True`, `tickets` is empty,
+        `message` advises supplying/narrowing `q`.
         """
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = str(status)
         if include_terminal:
             params["include_terminal"] = "true"
+        if q:
+            params["q"] = q
         data = self._request("GET", "/api/tickets/outbox", params=params, expect=200)
-        return [_outbound_from_payload(row) for row in data["tickets"]]
+        return OutboundTicketListResult(
+            tickets=[_outbound_from_payload(row) for row in data["tickets"]],
+            too_many=bool(data.get("too_many", False)),
+            count=int(data.get("count", 0)),
+            message=data.get("message"),
+        )
 
     # ---------------------------------------------------------------
     # Negotiation actions
