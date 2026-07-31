@@ -1278,3 +1278,73 @@ class TestErrorMapping:
         assert not isinstance(exc.value, (HiveMakeAuthError, HiveMakeNotFound,
                                           HiveMakeForbidden, HiveMakeConflict,
                                           HiveMakeServerError, HiveMakeValidationError))
+
+
+# ---------------------------------------------------------------------------
+# check_tickets
+# ---------------------------------------------------------------------------
+
+class TestCheckTickets:
+
+    @responses.activate
+    def test_empty(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "unread": [],
+                "too_many": False, "count": 0, "message": None,
+            },
+            status=200,
+        )
+        result = client.check_tickets()
+        assert result.inbox == []
+        assert result.unread == []
+        assert result.too_many is False
+        assert result.count == 0
+
+    @responses.activate
+    def test_parses_both_buckets(self, client) -> None:
+        inbox_id, unread_id = uuid4(), uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [_ticket_payload(ticket_id=inbox_id)],
+                "unread": [{
+                    "ticket": _ticket_payload(
+                        ticket_id=unread_id, status="resolved",
+                    ),
+                    "last_activity_at": 1785500000,
+                    "is_creator": True,
+                }],
+                "too_many": False, "count": 2, "message": None,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert [t.id for t in result.inbox] == [inbox_id]
+        assert [u.ticket.id for u in result.unread] == [unread_id]
+        # UUID coercion must apply inside the nested unread rows too, not
+        # just the flat inbox list.
+        assert isinstance(result.unread[0].ticket.id, UUID)
+        assert result.unread[0].last_activity_at == 1785500000
+        assert result.unread[0].is_creator is True
+        assert result.count == 2
+
+    @responses.activate
+    def test_overflow_empties_both_buckets(self, client) -> None:
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "unread": [],
+                "too_many": True, "count": 42,
+                "message": "You have 42 tickets needing attention",
+            },
+            status=200,
+        )
+        result = client.check_tickets()
+        assert result.too_many is True
+        assert result.count == 42
+        assert result.inbox == []
+        assert result.unread == []
+        assert "42" in result.message

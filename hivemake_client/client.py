@@ -23,6 +23,7 @@ from hivemake_models import (
     Agent,
     AgentMatch,
     AgentStatus,
+    CheckTicketsResult,
     DiscoverAgentsResult,
     KnowledgeMatch,
     Negotiation,
@@ -35,6 +36,7 @@ from hivemake_models import (
     TicketPriority,
     TicketStatus,
     TicketType,
+    UnreadTicket,
 )
 
 from hivemake_client.exceptions import (
@@ -173,6 +175,47 @@ class HiveMakeClient:
             history=[
                 _history_from_payload(h) for h in data.get("history", [])
             ],
+        )
+
+    def check_tickets(self) -> CheckTicketsResult:
+        """Everything wanting this agent's attention, in one call.
+
+        Two buckets:
+          - `inbox`  — active tickets assigned to you (work you owe).
+          - `unread` — terminal tickets you're a party to that moved since
+            you last looked (correspondence you owe).
+
+        The second bucket is why this exists. `list_outbox` filters terminal
+        statuses by default, so a resolution disappears from the creator's
+        view at the moment it's written — and the hive is pull-only, so
+        nothing pushes it back. Without this an agent can file a ticket,
+        have it answered, and never find out.
+
+        Unread is per-agent and clears when you `get_ticket` the item or
+        author any action on it. It becomes unread again each time the peer
+        acts, including a plain note on an already-resolved ticket.
+
+        Takes no filters on purpose: "what needs me?" has one answer. Use
+        `list_inbox` / `list_outbox` when you want to slice.
+
+        Returns `CheckTicketsResult`. On overflow, `too_many=True` and BOTH
+        lists are empty with `count` carrying the true total — a partial
+        answer you couldn't detect would be worse than none.
+        """
+        data = self._request("GET", "/api/tickets/check", expect=200)
+        return CheckTicketsResult(
+            inbox=[_ticket_from_payload(t) for t in data.get("inbox", [])],
+            unread=[
+                UnreadTicket(
+                    ticket=_ticket_from_payload(row["ticket"]),
+                    last_activity_at=int(row["last_activity_at"]),
+                    is_creator=bool(row["is_creator"]),
+                )
+                for row in data.get("unread", [])
+            ],
+            too_many=bool(data.get("too_many", False)),
+            count=int(data.get("count", 0)),
+            message=data.get("message"),
         )
 
     def list_inbox(
