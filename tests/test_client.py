@@ -4,11 +4,14 @@ Uses the `responses` library to mock the HiveMake server. No real network.
 """
 
 import json
+import logging
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import pytest
 import responses
+
+from hivemake_client import client as client_module
 
 from hivemake_client import (
     FileTicketRequest,
@@ -27,6 +30,7 @@ from hivemake_models import (
     TicketPriority,
     TicketStatus,
     TicketType,
+    WaitingParty,
 )
 
 
@@ -360,6 +364,113 @@ class TestGetTicket:
         assert len(detail.history) == 1
         assert detail.history[0].field_changed == "status"
         assert detail.history[0].new_value == "info_requested"
+        # This payload predates the whose-turn fields — they must default
+        # to None rather than KeyError. Old server, new client.
+        assert detail.waiting_on is None
+        assert detail.creator_agent_name is None
+        assert detail.assigned_agent_name is None
+
+    @responses.activate
+    def test_parses_waiting_on_and_party_names(self, client) -> None:
+        """`waiting_on` and `assigned_agent` name OPPOSITE parties on
+        info_requested — that divergence is the reason the field exists,
+        so assert they disagree rather than just that both are present."""
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(
+                    ticket_id=ticket_id, status="info_requested",
+                ),
+                "negotiations": [],
+                "history": [],
+                "waiting_on": "creator",
+                "creator_agent": {"name": "athena-server-admin-agent"},
+                "assigned_agent": {"name": "materia-developer-agent"},
+            },
+            status=200,
+        )
+
+        detail = client.get_ticket(ticket_id)
+        assert detail.waiting_on is WaitingParty.CREATOR
+        assert detail.creator_agent_name == "athena-server-admin-agent"
+        assert detail.assigned_agent_name == "materia-developer-agent"
+
+    @responses.activate
+    def test_unknown_waiting_on_degrades_to_none(self, client) -> None:
+        """Forward-compat, the direction that's easy to miss. A NEWER
+        server adding a fifth WaitingParty must not take down an older
+        client: strict enum coercion would raise ValueError and turn the
+        whole call into an error, losing the ticket, the thread and the
+        history over one advisory field."""
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "negotiations": [],
+                "history": [],
+                "waiting_on": "some_future_party",
+                "creator_agent": {"name": "a"},
+                "assigned_agent": {"name": "b"},
+            },
+            status=200,
+        )
+
+        detail = client.get_ticket(ticket_id)
+        assert detail.waiting_on is None
+        # The rest of the response must survive intact — that is the point.
+        assert detail.ticket.id == ticket_id
+        assert detail.creator_agent_name == "a"
+
+    @responses.activate
+    def test_unknown_waiting_on_warns_once_per_value(self, client, caplog) -> None:
+        """`get_ticket` is on the polling path, so an unthrottled warning
+        would emit one line per call, per agent, for the whole duration of
+        a version skew — burying the signal under its own volume."""
+        client_module._seen_unknown_waiting_on.clear()
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "negotiations": [], "history": [],
+                "waiting_on": "some_future_party",
+            },
+            status=200,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hivemake_client.client"):
+            for _ in range(3):
+                client.get_ticket(ticket_id)
+
+        warnings = [
+            r for r in caplog.records if "unknown waiting_on" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+    @responses.activate
+    def test_null_party_payloads_are_none(self, client) -> None:
+        """`assigned_agent_id` is nullable, and an agent row can be deleted
+        out from under an old ticket — both arrive as null, not omitted."""
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "negotiations": [],
+                "history": [],
+                "waiting_on": "assignee",
+                "creator_agent": None,
+                "assigned_agent": None,
+            },
+            status=200,
+        )
+
+        detail = client.get_ticket(ticket_id)
+        assert detail.waiting_on is WaitingParty.ASSIGNEE
+        assert detail.creator_agent_name is None
+        assert detail.assigned_agent_name is None
 
     @responses.activate
     def test_empty_thread_ok(self, client) -> None:

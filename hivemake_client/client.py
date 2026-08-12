@@ -12,6 +12,7 @@ hive/project) on every request, so the client surface has no notion of
 "current hive": all routing is keyed off the env.
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Optional, Union
@@ -37,6 +38,7 @@ from hivemake_models import (
     TicketStatus,
     TicketType,
     UnreadTicket,
+    WaitingParty,
 )
 
 from hivemake_client.exceptions import (
@@ -50,6 +52,13 @@ from hivemake_client.exceptions import (
     HiveMakeValidationError,
 )
 
+
+logger = logging.getLogger(__name__)
+
+# Unknown `waiting_on` values already warned about — see `_waiting_party`.
+# Bounded in practice by the number of enum values a server can invent, so
+# it cannot grow without bound the way a per-ticket cache would.
+_seen_unknown_waiting_on: set[str] = set()
 
 DEFAULT_BASE_URL = "https://api.hivemake.ai"
 DEFAULT_TIMEOUT = 30.0
@@ -78,10 +87,22 @@ class TicketDetail:
     """Return shape of `HiveMakeClient.get_ticket`. Carries the ticket
     record plus the full negotiation thread and history so a tool-only
     agent can read messages exchanged on the ticket (which `list_inbox`
-    / `list_outbox` deliberately omit)."""
+    / `list_outbox` deliberately omit).
+
+    `waiting_on` is the whose-turn-is-it dimension, which is NOT the
+    assignment: on `info_requested` the assignee asked a question and the
+    CREATOR owes the answer, so the two name opposite parties. Server-
+    derived, so every surface agrees on the rule.
+
+    All three of the newer fields default to None so this parses against a
+    server that predates them.
+    """
     ticket: Ticket
     negotiations: list[Negotiation]
     history: list[TicketHistory]
+    waiting_on: Optional[WaitingParty] = None
+    creator_agent_name: Optional[str] = None
+    assigned_agent_name: Optional[str] = None
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -163,10 +184,15 @@ class HiveMakeClient:
         message text on a `request_info` or `info_provided` negotiation —
         `list_inbox` / `list_outbox` return only the Ticket record. The
         caller must be the creator or assignee, or a member of the hive.
+
+        Also carries `waiting_on` plus both parties' names, so a caller can
+        tell whose move it is without re-deriving it from status and
+        comparing agent ids by hand.
         """
         data = self._request(
             "GET", f"/api/tickets/{ticket_id}", expect=200,
         )
+        waiting_on_raw = data.get("waiting_on")
         return TicketDetail(
             ticket=_ticket_from_payload(data["ticket"]),
             negotiations=[
@@ -175,6 +201,9 @@ class HiveMakeClient:
             history=[
                 _history_from_payload(h) for h in data.get("history", [])
             ],
+            waiting_on=_waiting_party(waiting_on_raw),
+            creator_agent_name=_agent_name(data.get("creator_agent")),
+            assigned_agent_name=_agent_name(data.get("assigned_agent")),
         )
 
     def check_tickets(self) -> CheckTicketsResult:
@@ -741,6 +770,54 @@ def _history_from_payload(payload: dict[str, Any]) -> TicketHistory:
         if isinstance(v, str):
             out[key] = UUID(v)
     return TicketHistory(**out)
+
+
+def _waiting_party(raw: Optional[str]) -> Optional[WaitingParty]:
+    """Coerce the wire's `waiting_on` string, tolerating both directions.
+
+    Absent / null → None, for a server that predates the field.
+
+    UNKNOWN VALUE → also None, which is the half that is easy to miss. A
+    bare `WaitingParty(raw)` is strict, so the day a newer server adds a
+    fifth party, every older client calling `get_ticket` raises ValueError
+    and the whole call becomes a wire-level error — the agent loses the
+    ticket, the negotiation thread and the history over a purely advisory
+    field. Degrading to the already-documented "this server doesn't say"
+    path costs nothing and keeps the useful 95% of the response.
+
+    Logged rather than silent: an unknown value means this client is
+    behind, which is worth knowing before it becomes a support question.
+    Logged ONCE PER DISTINCT VALUE, because `get_ticket` sits on the agent
+    polling path — an unthrottled warning here would emit a line per call,
+    per agent, for as long as the version skew lasts, burying the signal
+    in Loki under its own volume. The condition is static: the same
+    unknown value says nothing new the second time.
+    """
+    if not raw:
+        return None
+    try:
+        return WaitingParty(raw)
+    except ValueError:
+        if raw not in _seen_unknown_waiting_on:
+            _seen_unknown_waiting_on.add(raw)
+            logger.warning(
+                "unknown waiting_on value %r from server; treating as "
+                "unknown. This client is probably older than the server. "
+                "Further occurrences of this value are not logged.", raw,
+            )
+        return None
+
+
+def _agent_name(payload: Optional[dict[str, Any]]) -> Optional[str]:
+    """Pull `name` out of a `{"name": ...}` party payload.
+
+    None-safe on both levels: the server omits the key entirely on older
+    builds, and sends null when the agent row is gone or the ticket has no
+    assignee.
+    """
+    if not payload:
+        return None
+    return payload.get("name")
 
 
 def _ticket_from_payload(payload: dict[str, Any]) -> Ticket:
