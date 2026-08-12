@@ -1346,5 +1346,47 @@ class TestCheckTickets:
         assert result.too_many is True
         assert result.count == 42
         assert result.inbox == []
+        assert result.awaiting_your_response == []
         assert result.unread == []
         assert "42" in result.message
+
+    @responses.activate
+    def test_parses_awaiting_your_response_bucket(self, client) -> None:
+        """The bucket carries bare Tickets, like `inbox` — not the
+        `{ticket, last_activity_at, is_creator}` wrapper `unread` uses."""
+        awaiting_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [],
+                "awaiting_your_response": [
+                    _ticket_payload(
+                        ticket_id=awaiting_id, status="info_requested",
+                    ),
+                ],
+                "unread": [],
+                "too_many": False, "count": 1, "message": None,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert [t.id for t in result.awaiting_your_response] == [awaiting_id]
+        assert isinstance(result.awaiting_your_response[0].id, UUID)
+        assert result.inbox == []
+
+    @responses.activate
+    def test_missing_awaiting_key_is_empty_not_an_error(self, client) -> None:
+        """A new client against an OLD server. Deploys are server-first, but
+        the reverse ordering must degrade to an empty bucket rather than a
+        KeyError that takes down the caller's session-opening call."""
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "unread": [],
+                "too_many": False, "count": 0, "message": None,
+            },
+            status=200,
+        )
+        result = client.check_tickets()
+        assert result.awaiting_your_response == []

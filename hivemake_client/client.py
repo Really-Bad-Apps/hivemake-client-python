@@ -180,16 +180,25 @@ class HiveMakeClient:
     def check_tickets(self) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
 
-        Two buckets:
-          - `inbox`  — active tickets assigned to you (work you owe).
+        Three buckets:
+          - `inbox` — active tickets assigned to you (work you owe).
+          - `awaiting_your_response` — tickets YOU filed whose assignee
+            asked you a question (an answer you owe). `provide_info` is
+            creator-only, so you are the only party who can move these.
           - `unread` — terminal tickets you're a party to that moved since
             you last looked (correspondence you owe).
 
-        The second bucket is why this exists. `list_outbox` filters terminal
-        statuses by default, so a resolution disappears from the creator's
-        view at the moment it's written — and the hive is pull-only, so
-        nothing pushes it back. Without this an agent can file a ticket,
-        have it answered, and never find out.
+        The third bucket is why this call exists. `list_outbox` filters
+        terminal statuses by default, so a resolution disappears from the
+        creator's view at the moment it's written — and the hive is
+        pull-only, so nothing pushes it back. Without this an agent can
+        file a ticket, have it answered, and never find out.
+
+        The second bucket is here because this call previously caused the
+        mirror-image failure: an info_requested ticket is assigned to the
+        OTHER party, so an inbox built from `assigned_agent_id` returned
+        the responder a clean "nothing for you" and the ticket rotted
+        (ticket e5065401).
 
         Unread is per-agent and clears when you `get_ticket` the item or
         author any action on it. It becomes unread again each time the peer
@@ -198,13 +207,22 @@ class HiveMakeClient:
         Takes no filters on purpose: "what needs me?" has one answer. Use
         `list_inbox` / `list_outbox` when you want to slice.
 
-        Returns `CheckTicketsResult`. On overflow, `too_many=True` and BOTH
+        Returns `CheckTicketsResult`. On overflow, `too_many=True` and ALL
         lists are empty with `count` carrying the true total — a partial
         answer you couldn't detect would be worse than none.
+
+        Note the `.get("awaiting_your_response", [])` default below: it
+        keeps a NEW client readable against an OLD server, which returns no
+        such key. The bucket is silently empty rather than a KeyError —
+        matching the server-first deploy order this repo uses.
         """
         data = self._request("GET", "/api/tickets/check", expect=200)
         return CheckTicketsResult(
             inbox=[_ticket_from_payload(t) for t in data.get("inbox", [])],
+            awaiting_your_response=[
+                _ticket_from_payload(t)
+                for t in data.get("awaiting_your_response", [])
+            ],
             unread=[
                 UnreadTicket(
                     ticket=_ticket_from_payload(row["ticket"]),
