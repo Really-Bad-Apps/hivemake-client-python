@@ -1501,3 +1501,97 @@ class TestCheckTickets:
         )
         result = client.check_tickets()
         assert result.awaiting_your_response == []
+
+    @responses.activate
+    def test_parses_escalated_bucket_with_side(self, client) -> None:
+        """`is_creator` is the field that makes this bucket usable: on an
+        escalated ticket `waiting_on` is "human" for BOTH parties, so it
+        cannot say which side you are on."""
+        mine, theirs = uuid4(), uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "awaiting_your_response": [], "unread": [],
+                "escalated": [
+                    {
+                        "ticket": _ticket_payload(
+                            ticket_id=mine, status="escalated",
+                        ),
+                        "is_creator": False,
+                    },
+                    {
+                        "ticket": _ticket_payload(
+                            ticket_id=theirs, status="escalated",
+                        ),
+                        "is_creator": True,
+                    },
+                ],
+                "too_many": False, "count": 2, "message": None,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert [r.ticket.id for r in result.escalated] == [mine, theirs]
+        assert [r.is_creator for r in result.escalated] == [False, True]
+        assert isinstance(result.escalated[0].ticket.id, UUID)
+
+    @responses.activate
+    def test_overflow_digest_is_parsed(self, client) -> None:
+        """Overflow is no longer a dead end: buckets stay empty, and the
+        digest is the index the caller navigates with."""
+        digest_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "awaiting_your_response": [], "unread": [],
+                "escalated": [],
+                "too_many": True, "count": 42,
+                "message": "You have 42 tickets needing attention",
+                "digest": [
+                    {
+                        "ticket_id": str(digest_id),
+                        "title": "pgcat rollout stalled",
+                        "status": "escalated",
+                        "bucket": "escalated",
+                    },
+                ],
+                "digest_truncated": True,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert result.too_many is True
+        assert result.inbox == []
+        assert len(result.digest) == 1
+        assert result.digest[0].ticket_id == digest_id
+        assert isinstance(result.digest[0].ticket_id, UUID)
+        assert result.digest[0].status == TicketStatus.ESCALATED
+        assert result.digest[0].bucket == "escalated"
+        assert result.digest_truncated is True
+
+    @responses.activate
+    def test_missing_escalated_and_digest_keys_degrade_quietly(
+        self, client,
+    ) -> None:
+        """A NEW client against an OLD server, which knows neither key.
+
+        Must be empty rather than a KeyError — this is the agent's
+        session-opening call, so a crash here takes out the whole session.
+        Note the consequence: an empty `escalated` from an old server means
+        "this server doesn't say", NOT "no escalations", the same way
+        `waiting_on is None` does on get_ticket.
+        """
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "unread": [],
+                "too_many": False, "count": 0, "message": None,
+            },
+            status=200,
+        )
+        result = client.check_tickets()
+        assert result.escalated == []
+        assert result.digest == []
+        assert result.digest_truncated is False

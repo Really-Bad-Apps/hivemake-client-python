@@ -26,12 +26,14 @@ from hivemake_models import (
     AgentStatus,
     CheckTicketsResult,
     DiscoverAgentsResult,
+    EscalatedTicket,
     KnowledgeMatch,
     Negotiation,
     NegotiationAction,
     OutboundTicket,
     OutboundTicketListResult,
     Ticket,
+    TicketDigest,
     TicketHistory,
     TicketListResult,
     TicketPriority,
@@ -233,17 +235,29 @@ class HiveMakeClient:
         author any action on it. It becomes unread again each time the peer
         acts, including a plain note on an already-resolved ticket.
 
-        Takes no filters on purpose: "what needs me?" has one answer. Use
-        `list_inbox` / `list_outbox` when you want to slice.
+        A fourth bucket, `escalated`, carries tickets parked with a human.
+        Neither agent can act on those — it is read-only awareness, and it
+        exists because "cannot act" is not "should not know": across
+        sessions an agent forgets it escalated something, gets a clean
+        "nothing for you", and the work sits.
 
-        Returns `CheckTicketsResult`. On overflow, `too_many=True` and ALL
-        lists are empty with `count` carrying the true total — a partial
-        answer you couldn't detect would be worse than none.
+        Takes no filters on purpose: "what needs me?" has one answer.
 
-        Note the `.get("awaiting_your_response", [])` default below: it
-        keeps a NEW client readable against an OLD server, which returns no
-        such key. The bucket is silently empty rather than a KeyError —
-        matching the server-first deploy order this repo uses.
+        Returns `CheckTicketsResult`. On overflow, `too_many=True` and all
+        four bucket lists are empty — a partial answer you couldn't detect
+        would be worse than none — but `digest` then carries a compact index
+        (id, truncated title, status, bucket) of everything that would have
+        been in them, so the caller can pick one and `get_ticket` it.
+        `count` is the true total, so `count > len(digest)` is possible and
+        is reported by `digest_truncated`.
+
+        Note the `.get(..., [])` defaults below: they keep a NEW client
+        readable against an OLD server, which returns no such keys. Buckets
+        come back silently empty rather than raising KeyError — matching the
+        server-first deploy order this repo uses. Consequence worth knowing:
+        an empty `escalated` against an old server means "this server does
+        not say", not "no escalations", exactly as `waiting_on is None` does
+        on `get_ticket`.
         """
         data = self._request("GET", "/api/tickets/check", expect=200)
         return CheckTicketsResult(
@@ -260,9 +274,30 @@ class HiveMakeClient:
                 )
                 for row in data.get("unread", [])
             ],
+            escalated=[
+                EscalatedTicket(
+                    ticket=_ticket_from_payload(row["ticket"]),
+                    is_creator=bool(row["is_creator"]),
+                )
+                for row in data.get("escalated", [])
+            ],
             too_many=bool(data.get("too_many", False)),
             count=int(data.get("count", 0)),
             message=data.get("message"),
+            digest=[
+                TicketDigest(
+                    ticket_id=(
+                        UUID(row["ticket_id"])
+                        if isinstance(row["ticket_id"], str)
+                        else row["ticket_id"]
+                    ),
+                    title=row["title"],
+                    status=TicketStatus(row["status"]),
+                    bucket=row["bucket"],
+                )
+                for row in data.get("digest", [])
+            ],
+            digest_truncated=bool(data.get("digest_truncated", False)),
         )
 
     def list_inbox(
