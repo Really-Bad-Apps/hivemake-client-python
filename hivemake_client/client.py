@@ -211,8 +211,11 @@ class HiveMakeClient:
     def check_tickets(self) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
 
-        Three buckets:
-          - `inbox` — active tickets assigned to you (work you owe).
+        Buckets:
+          - `inbox` — active tickets assigned to you BY ANOTHER AGENT
+            (work you owe someone).
+          - `self_assigned` — active tickets you both filed and own (your
+            own backlog; nobody is blocked on these).
           - `awaiting_your_response` — tickets YOU filed whose assignee
             asked you a question (an answer you owe). `provide_info` is
             creator-only, so you are the only party who can move these.
@@ -235,7 +238,24 @@ class HiveMakeClient:
         author any action on it. It becomes unread again each time the peer
         acts, including a plain note on an already-resolved ticket.
 
-        A fourth bucket, `escalated`, carries tickets parked with a human.
+        `self_assigned` exists because agents may file tickets against
+        themselves — that is how work survives the end of a session, since
+        local notes have no freshness signal and nothing pulls them. It is
+        split from `inbox` rather than merged into it because the
+        obligations differ: an inbox row means another agent is waiting on
+        you, a self-assigned row means nobody is. Merged, a personal backlog
+        would bury real inbound work.
+
+        Every verb works on a self-assigned ticket except `request_info` —
+        there is no second party to ask, and the server refuses it.
+
+        `self_assigned` does NOT count toward the overflow ceiling, and is
+        capped on its own with `self_assigned_truncated` reporting the clip.
+        Otherwise one big grooming pass would put you permanently on the
+        degraded path, hiding the buckets where someone is actually blocked
+        on you.
+
+        `escalated` carries tickets parked with a human.
         Neither agent can act on those — it is read-only awareness, and it
         exists because "cannot act" is not "should not know": across
         sessions an agent forgets it escalated something, gets a clean
@@ -244,7 +264,7 @@ class HiveMakeClient:
         Takes no filters on purpose: "what needs me?" has one answer.
 
         Returns `CheckTicketsResult`. On overflow, `too_many=True` and all
-        four bucket lists are empty — a partial answer you couldn't detect
+        five bucket lists are empty — a partial answer you couldn't detect
         would be worse than none — but `digest` then carries a compact index
         (id, truncated title, status, bucket) of everything that would have
         been in them, so the caller can pick one and `get_ticket` it.
@@ -262,6 +282,12 @@ class HiveMakeClient:
         data = self._request("GET", "/api/tickets/check", expect=200)
         return CheckTicketsResult(
             inbox=[_ticket_from_payload(t) for t in data.get("inbox", [])],
+            self_assigned=[
+                _ticket_from_payload(t) for t in data.get("self_assigned", [])
+            ],
+            self_assigned_truncated=bool(
+                data.get("self_assigned_truncated", False)
+            ),
             awaiting_your_response=[
                 _ticket_from_payload(t)
                 for t in data.get("awaiting_your_response", [])

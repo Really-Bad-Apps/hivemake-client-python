@@ -1487,6 +1487,67 @@ class TestCheckTickets:
         assert result.inbox == []
 
     @responses.activate
+    def test_parses_self_assigned_bucket(self, client) -> None:
+        """Bare Tickets like `inbox`, and kept OUT of `inbox` — the split is
+        the point: a personal backlog must not bury inbound work."""
+        mine, theirs = uuid4(), uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [_ticket_payload(ticket_id=theirs, status="open")],
+                "self_assigned": [
+                    _ticket_payload(ticket_id=mine, status="open"),
+                ],
+                "awaiting_your_response": [],
+                "unread": [],
+                "too_many": False, "count": 2, "message": None,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert [t.id for t in result.self_assigned] == [mine]
+        assert [t.id for t in result.inbox] == [theirs]
+        assert isinstance(result.self_assigned[0].id, UUID)
+        assert result.self_assigned_truncated is False
+
+    @responses.activate
+    def test_parses_self_assigned_truncated_flag(self, client) -> None:
+        """The backlog cap is signalled, not silent — and it is separate
+        from `too_many`, which self-assigned work never triggers."""
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "self_assigned": [], "awaiting_your_response": [],
+                "unread": [],
+                "self_assigned_truncated": True,
+                "too_many": False, "count": 20, "message": None,
+            },
+            status=200,
+        )
+
+        result = client.check_tickets()
+        assert result.self_assigned_truncated is True
+        assert result.too_many is False
+
+    @responses.activate
+    def test_missing_self_assigned_key_is_empty_not_an_error(self, client) -> None:
+        """New client, OLD server. Degrades to an empty bucket rather than a
+        KeyError in the call every session opens with. Same caveat as
+        `escalated`: empty means "this server does not say", not "you have
+        no self-assigned work"."""
+        responses.get(
+            f"{BASE}/api/tickets/check",
+            json={
+                "inbox": [], "awaiting_your_response": [], "unread": [],
+                "too_many": False, "count": 0, "message": None,
+            },
+            status=200,
+        )
+        result = client.check_tickets()
+        assert result.self_assigned == []
+
+    @responses.activate
     def test_missing_awaiting_key_is_empty_not_an_error(self, client) -> None:
         """A new client against an OLD server. Deploys are server-first, but
         the reverse ordering must degrade to an empty bucket rather than a
