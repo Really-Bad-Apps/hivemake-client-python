@@ -162,11 +162,11 @@ class HiveMakeClient:
         caller's hive regardless of routing target.
 
         Returns an `OutboundTicket` — the ticket plus a
-        `waiting_on_autonomous` polling hint about the assignee. If
-        True, the assignee runs on schedule and starts working
-        immediately, so the caller can poll `get_ticket` right away;
-        if False, the assignee needs a human to drive them and
-        polling before that nudge is wasted.
+        `waiting_on_autonomous` polling hint about the assignee, plus an optional
+        `suggested_poll_interval_seconds` for waiting on its first response.
+        When autonomous, poll at that interval when provided; otherwise use
+        backoff starting around 30 seconds. Manual agents need a human nudge,
+        so polling before that nudge is wasted.
         """
         body = {
             "target_project_id": str(request.target_project_id),
@@ -434,8 +434,9 @@ class HiveMakeClient:
         Unbounded: a ticket can be reopened any number of times.
 
         Returns `OutboundTicket` — reopen puts the ticket back on the
-        assignee, so `waiting_on_autonomous` tells the caller whether
-        to poll immediately."""
+        assignee, so `waiting_on_autonomous` tells the caller whether to poll.
+        Use `suggested_poll_interval_seconds` when provided for that first
+        response; it does not estimate completion time."""
         return self._dispatch_outbound_action(
             ticket_id, NegotiationAction.REOPENED, message,
         )
@@ -906,6 +907,7 @@ def _outbound_from_payload(payload: dict[str, Any]) -> OutboundTicket:
     return OutboundTicket(
         ticket=_ticket_from_payload(payload["ticket"]),
         waiting_on_autonomous=bool(payload["waiting_on_autonomous"]),
+        suggested_poll_interval_seconds=payload.get("suggested_poll_interval_seconds"),
     )
 
 

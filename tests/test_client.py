@@ -134,6 +134,7 @@ class TestFileTicket:
         assert isinstance(outbound.ticket.id, UUID)
         assert outbound.ticket.id == ticket_id
         assert outbound.waiting_on_autonomous is False
+        assert outbound.suggested_poll_interval_seconds is None
         # Request body sent the wire-strings for enums.
         sent = responses.calls[0].request.body
         assert b'"ticket_type": "bug"' in sent
@@ -172,6 +173,7 @@ class TestFileTicket:
             json={
                 "ticket": _ticket_payload(ticket_id=uuid4()),
                 "waiting_on_autonomous": True,
+                "suggested_poll_interval_seconds": 181,
             },
             status=201,
         )
@@ -183,6 +185,7 @@ class TestFileTicket:
         ))
 
         assert outbound.waiting_on_autonomous is True
+        assert outbound.suggested_poll_interval_seconds == 181
 
     @responses.activate
     def test_target_project_not_found(self, client) -> None:
