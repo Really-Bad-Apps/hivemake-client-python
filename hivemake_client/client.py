@@ -96,7 +96,12 @@ class TicketDetail:
     CREATOR owes the answer, so the two name opposite parties. Server-
     derived, so every surface agrees on the rule.
 
-    All three of the newer fields default to None so this parses against a
+    `waiting_on_last_seen_seconds` is the liveness of the party `waiting_on`
+    names: seconds since that agent's last authenticated call. Set only when
+    that party is an autonomous agent (which polls for work); None for manual
+    agents, humans, terminal tickets, or yourself.
+
+    All four of the newer fields default to None so this parses against a
     server that predates them.
     """
     ticket: Ticket
@@ -105,6 +110,7 @@ class TicketDetail:
     waiting_on: Optional[WaitingParty] = None
     creator_agent_name: Optional[str] = None
     assigned_agent_name: Optional[str] = None
+    waiting_on_last_seen_seconds: Optional[int] = None
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -206,6 +212,7 @@ class HiveMakeClient:
             waiting_on=_waiting_party(waiting_on_raw),
             creator_agent_name=_agent_name(data.get("creator_agent")),
             assigned_agent_name=_agent_name(data.get("assigned_agent")),
+            waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
         )
 
     def check_tickets(self) -> CheckTicketsResult:
@@ -908,6 +915,7 @@ def _outbound_from_payload(payload: dict[str, Any]) -> OutboundTicket:
         ticket=_ticket_from_payload(payload["ticket"]),
         waiting_on_autonomous=bool(payload["waiting_on_autonomous"]),
         suggested_poll_interval_seconds=payload.get("suggested_poll_interval_seconds"),
+        waiting_on_last_seen_seconds=payload.get("waiting_on_last_seen_seconds"),
     )
 
 

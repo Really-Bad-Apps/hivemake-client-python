@@ -186,6 +186,29 @@ class TestFileTicket:
 
         assert outbound.waiting_on_autonomous is True
         assert outbound.suggested_poll_interval_seconds == 181
+        # Absent from this payload (an older server) → None, not an error.
+        assert outbound.waiting_on_last_seen_seconds is None
+
+    @responses.activate
+    def test_file_ticket_surfaces_assignee_last_seen(self, client) -> None:
+        responses.post(
+            f"{BASE}/api/tickets",
+            json={
+                "ticket": _ticket_payload(ticket_id=uuid4()),
+                "waiting_on_autonomous": True,
+                "suggested_poll_interval_seconds": 30,
+                "waiting_on_last_seen_seconds": 93,
+            },
+            status=201,
+        )
+
+        outbound = client.file_ticket(FileTicketRequest(
+            target_project_id=uuid4(),
+            ticket_type=TicketType.TASK,
+            title="X", description="Y",
+        ))
+
+        assert outbound.waiting_on_last_seen_seconds == 93
 
     @responses.activate
     def test_target_project_not_found(self, client) -> None:
@@ -398,6 +421,26 @@ class TestGetTicket:
         assert detail.waiting_on is WaitingParty.CREATOR
         assert detail.creator_agent_name == "athena-server-admin-agent"
         assert detail.assigned_agent_name == "materia-developer-agent"
+        # Not sent by this payload → None.
+        assert detail.waiting_on_last_seen_seconds is None
+
+    @responses.activate
+    def test_parses_waiting_on_last_seen(self, client) -> None:
+        ticket_id = uuid4()
+        responses.get(
+            f"{BASE}/api/tickets/{ticket_id}",
+            json={
+                "ticket": _ticket_payload(ticket_id=ticket_id),
+                "negotiations": [],
+                "history": [],
+                "waiting_on": "assignee",
+                "waiting_on_last_seen_seconds": 42,
+            },
+            status=200,
+        )
+
+        detail = client.get_ticket(ticket_id)
+        assert detail.waiting_on_last_seen_seconds == 42
 
     @responses.activate
     def test_unknown_waiting_on_degrades_to_none(self, client) -> None:
