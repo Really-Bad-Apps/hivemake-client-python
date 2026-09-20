@@ -1774,3 +1774,101 @@ class TestCheckTickets:
         assert result.escalated == []
         assert result.digest == []
         assert result.digest_truncated is False
+
+
+class TestAdminUsage:
+
+    @responses.activate
+    def test_parses_the_report_with_owners_and_hives(
+        self, client: HiveMakeClient,
+    ) -> None:
+        run_id, owner_id, hive_id, snap_id = uuid4(), uuid4(), uuid4(), uuid4()
+        responses.get(f"{BASE}/api/admin/usage", json={
+            "run_id": str(run_id), "measured_at": 1789933001,
+            "method_version": "2026-09-20",
+            "cognee_db_total_bytes": 3_824_058_368,
+            "attributed_bytes": 2_426_404_864,
+            "edge_vector_match_ratio": 0.8978,
+            "owners": [{
+                "owner_user_id": str(owner_id), "owner_email": "a@b.com",
+                "measured_at": 1789933001, "total_bytes": 615,
+                "exact_bytes": 600, "apportioned_bytes": 15,
+                "includes_graph_store": False,
+                "hives": [{
+                    "id": str(snap_id), "run_id": str(run_id),
+                    "hive_id": str(hive_id), "hive_slug": "acme",
+                    "owner_user_id": str(owner_id), "measured_at": 1789933001,
+                    "node_row_count": 10, "edge_row_count": 20,
+                    "exact_bytes": 100, "edge_vector_bytes": 500,
+                    "shared_entity_bytes": 10, "shared_edge_vector_bytes": 5,
+                    "estimated_graph_bytes": None, "total_bytes": 615,
+                }],
+            }],
+        }, status=200)
+
+        report = client.admin_usage()
+
+        assert isinstance(report.run_id, UUID)
+        assert report.edge_vector_match_ratio == 0.8978
+        assert len(report.owners) == 1
+        assert report.owners[0].owner_email == "a@b.com"
+        assert isinstance(report.owners[0].owner_user_id, UUID)
+        assert report.owners[0].hives[0].hive_slug == "acme"
+        assert isinstance(report.owners[0].hives[0].hive_id, UUID)
+
+    @responses.activate
+    def test_no_successful_sweep_is_None_not_an_empty_report(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """None means nothing has been measured; an empty `owners` list means
+        a sweep ran and found no billable storage. Collapsing them would make
+        'the meter is broken' and 'nobody is using anything' identical."""
+        responses.get(f"{BASE}/api/admin/usage",
+                      json={"error": "no_successful_run"}, status=404)
+
+        assert client.admin_usage() is None
+
+    @responses.activate
+    def test_a_sweep_with_no_billable_owners_is_an_EMPTY_report(
+        self, client: HiveMakeClient,
+    ) -> None:
+        responses.get(f"{BASE}/api/admin/usage", json={
+            "run_id": str(uuid4()), "measured_at": 1, "method_version": "m",
+            "cognee_db_total_bytes": 10, "attributed_bytes": 0,
+            "edge_vector_match_ratio": 0.9, "owners": [],
+        }, status=200)
+
+        report = client.admin_usage()
+
+        assert report is not None
+        assert report.owners == []
+
+    @responses.activate
+    def test_forbidden_propagates_rather_than_looking_empty(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """A caller off the allowlist must NOT see something that reads like
+        'no usage' — that is the same silent-absence trap as recall."""
+        responses.get(f"{BASE}/api/admin/usage",
+                      json={"error": "forbidden"}, status=403)
+
+        with pytest.raises(HiveMakeForbidden):
+            client.admin_usage()
+
+    @responses.activate
+    def test_a_string_ratio_is_coerced_to_float(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """DOUBLE PRECISION today, but a server that switched the column to
+        NUMERIC would serialise it as a STRING — which would compare wrong
+        against a floor without ever raising."""
+        responses.get(f"{BASE}/api/admin/usage", json={
+            "run_id": str(uuid4()), "measured_at": 1, "method_version": "m",
+            "cognee_db_total_bytes": 10, "attributed_bytes": 6,
+            "edge_vector_match_ratio": "0.8978", "owners": [],
+        }, status=200)
+
+        ratio = client.admin_usage().edge_vector_match_ratio
+
+        assert isinstance(ratio, float)
+        assert ratio < 0.9

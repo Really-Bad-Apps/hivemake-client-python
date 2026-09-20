@@ -27,11 +27,13 @@ from hivemake_models import (
     CheckTicketsResult,
     DiscoverAgentsResult,
     EscalatedTicket,
+    HiveUsageSnapshot,
     KnowledgeMatch,
     Negotiation,
     NegotiationAction,
     OutboundTicket,
     OutboundTicketListResult,
+    OwnerUsage,
     Ticket,
     TicketDigest,
     TicketHistory,
@@ -40,6 +42,7 @@ from hivemake_models import (
     TicketStatus,
     TicketType,
     UnreadTicket,
+    UsageReport,
     WaitingParty,
 )
 
@@ -723,6 +726,29 @@ class HiveMakeClient:
         )
         return data.get("answer", "")
 
+    def admin_usage(self) -> Optional[UsageReport]:
+        """Every owner's storage footprint as of the latest successful sweep.
+
+        ADMIN ONLY — this crosses the owner boundary that every other read on
+        this client respects, so the server gates it on an explicit
+        allowlist. A caller that is not on it gets 403, which surfaces as
+        `HiveMakeForbidden`.
+
+        Returns None when no sweep has ever succeeded. That is distinct from
+        a report with no owners: None means nothing has been measured, an
+        empty `owners` list means a sweep ran and found no billable storage.
+        Collapsing the two would make "the meter is broken" and "nobody is
+        using anything" look identical, and those have opposite responses.
+
+        The figures are up to a day old by design — read `measured_at` before
+        quoting one at anybody.
+        """
+        try:
+            data = self._request("GET", "/api/admin/usage", expect=200)
+        except HiveMakeNotFound:
+            return None
+        return _usage_report_from_payload(data)
+
     def add_learning(
         self,
         content: str,
@@ -820,6 +846,46 @@ class HiveMakeClient:
         if resp.status_code != expect:
             _raise_for_status(resp)
         return resp.json()
+
+
+def _usage_report_from_payload(data: dict[str, Any]) -> UsageReport:
+    """Rebuild a UsageReport, coercing the uuid/float fields the wire flattens.
+
+    `edge_vector_match_ratio` is coerced to float explicitly: it is DOUBLE
+    PRECISION server-side, but a server that ever switched it to NUMERIC
+    would serialise it as a STRING and this would silently become a str that
+    compares wrong against a floor without ever raising.
+    """
+    owners: list[OwnerUsage] = []
+    for raw in data.get("owners") or []:
+        hives: list[HiveUsageSnapshot] = []
+        for snap in raw.get("hives") or []:
+            hives.append(HiveUsageSnapshot(**_coerce_snapshot(snap)))
+        fields = dict(raw)
+        fields["owner_user_id"] = UUID(str(fields["owner_user_id"]))
+        fields["hives"] = hives
+        owners.append(OwnerUsage(**fields))
+
+    ratio = data.get("edge_vector_match_ratio")
+    return UsageReport(
+        run_id=UUID(str(data["run_id"])),
+        measured_at=int(data["measured_at"]),
+        method_version=data["method_version"],
+        cognee_db_total_bytes=int(data["cognee_db_total_bytes"]),
+        attributed_bytes=int(data["attributed_bytes"]),
+        edge_vector_match_ratio=float(ratio) if ratio is not None else None,
+        owners=owners,
+    )
+
+
+def _coerce_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
+    """uuid strings back into UUIDs for one snapshot payload."""
+    out = dict(snap)
+    for key in ("id", "run_id", "hive_id", "owner_user_id"):
+        value = out.get(key)
+        if value is not None:
+            out[key] = UUID(str(value))
+    return out
 
 
 _AGENT_UUID_FIELDS = ("id", "hive_id", "project_id")
