@@ -1329,6 +1329,78 @@ class TestRecallKnowledge:
         body = json.loads(req.body)
         assert body == {"query": "what is postgres pool exhaustion"}
 
+    @responses.activate
+    def test_recall_uses_its_own_longer_budget(self, client: HiveMakeClient) -> None:
+        """REGRESSION. recall waits on an LLM (~31s measured); the
+        client-wide 30s default cut it off before the server could answer,
+        which made the server-side timeout fix a no-op."""
+        responses.post(
+            f"{BASE}/api/knowledge/recall", json={"answer": "x"}, status=200,
+        )
+
+        client.recall_knowledge("q")
+
+        assert responses.calls[0].request.req_kwargs["timeout"] == (
+            client_module.RECALL_TIMEOUT
+        )
+
+    @responses.activate
+    def test_other_endpoints_keep_the_short_default(self, client: HiveMakeClient) -> None:
+        """Guards the SPLIT. If recall's budget were applied client-wide,
+        the test above still passes while every ordinary database read
+        gains permission to hang for 75s."""
+        responses.post(
+            f"{BASE}/api/knowledge/learnings",
+            json={"learning_id": str(uuid4())}, status=200,
+        )
+
+        client.add_learning("something worth keeping")
+
+        assert responses.calls[0].request.req_kwargs["timeout"] == (
+            client_module.DEFAULT_TIMEOUT
+        )
+
+
+class TestTimeoutNesting:
+    """The composition, not any single value.
+
+    Every layer's timeout was individually defensible while the stack as a
+    whole could not return an answer. These assert the ordering that makes
+    the layers compose: each budget must outlast the one inside it, so the
+    innermost failure is the one that surfaces as a handled error.
+    """
+
+    def test_recall_budget_outlasts_the_servers_own_cognee_budget(self) -> None:
+        """If this client gives up first, hivemake-core's handled
+        empty-result degradation never gets to run and the agent sees a
+        bare disconnect instead."""
+        core_cognee_completion_budget_s = 50.0  # COGNEE_COMPLETION_TIMEOUT_S
+
+        assert client_module.RECALL_TIMEOUT > core_cognee_completion_budget_s
+
+    def test_recall_budget_outlasts_a_default_nginx_proxy_read_timeout(self) -> None:
+        """apollo's vhost for api.hivemake.ai is not in this repo, so its
+        `proxy_read_timeout` is assumed, not known. If nginx cuts first we
+        want to still be listening, so the 504 surfaces as a status rather
+        than as a generic client-side timeout with no server-side trace."""
+        assumed_nginx_proxy_read_timeout_s = 60.0  # nginx default
+
+        assert client_module.RECALL_TIMEOUT > assumed_nginx_proxy_read_timeout_s
+
+    def test_recall_budget_stays_under_the_gunicorn_worker_kill(self) -> None:
+        """Above this, the worker is SIGKILLed mid-request — no handler
+        runs, no error is logged, and the 500 reads as a server fault
+        rather than a config choice."""
+        gunicorn_worker_timeout_s = 90.0  # hivemake-server/Dockerfile
+
+        assert client_module.RECALL_TIMEOUT < gunicorn_worker_timeout_s
+
+    def test_recall_budget_exceeds_measured_completion_latency(self) -> None:
+        """The check whose absence let a 25s budget serve a 31s workload."""
+        slowest_observed_completion_s = 34.3  # live cognee, 2026-09-20
+
+        assert client_module.RECALL_TIMEOUT > slowest_observed_completion_s
+
 
 class TestAddLearning:
 
