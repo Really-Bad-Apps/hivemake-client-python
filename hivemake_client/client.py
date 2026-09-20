@@ -745,7 +745,23 @@ class HiveMakeClient:
         """
         try:
             data = self._request("GET", "/api/admin/usage", expect=200)
-        except HiveMakeNotFound:
+        except HiveMakeNotFound as exc:
+            # Discriminate on the error CODE, not the status. Two different
+            # 404s reach here and they mean opposite things:
+            #
+            #   no_successful_run -> the meter has genuinely not produced a
+            #                        figure yet. A real, reportable answer.
+            #   not_found         -> the ROUTE does not exist: an older
+            #                        server, a routing change, a typo.
+            #
+            # Collapsing them would make "this server cannot answer" look
+            # exactly like "nothing has been measured" — a confident false
+            # negative, which is the failure this whole surface was built to
+            # avoid. Observed live on 2026-09-20: mcp :48 shipped ahead of
+            # server :92 and the missing route reported as a clean
+            # UsageNotMeasured.
+            if exc.error_code != "no_successful_run":
+                raise
             return None
         return _usage_report_from_payload(data)
 
@@ -860,22 +876,49 @@ def _usage_report_from_payload(data: dict[str, Any]) -> UsageReport:
     for raw in data.get("owners") or []:
         hives: list[HiveUsageSnapshot] = []
         for snap in raw.get("hives") or []:
-            hives.append(HiveUsageSnapshot(**_coerce_snapshot(snap)))
+            hives.append(HiveUsageSnapshot(**_known_fields(HiveUsageSnapshot, _coerce_snapshot(snap))))
         fields = dict(raw)
         fields["owner_user_id"] = UUID(str(fields["owner_user_id"]))
         fields["hives"] = hives
-        owners.append(OwnerUsage(**fields))
+        owners.append(OwnerUsage(**_known_fields(OwnerUsage, fields)))
 
-    ratio = data.get("edge_vector_match_ratio")
     return UsageReport(
         run_id=UUID(str(data["run_id"])),
-        measured_at=int(data["measured_at"]),
         method_version=data["method_version"],
-        cognee_db_total_bytes=int(data["cognee_db_total_bytes"]),
-        attributed_bytes=int(data["attributed_bytes"]),
-        edge_vector_match_ratio=float(ratio) if ratio is not None else None,
         owners=owners,
+        # `_opt_int` / `_opt_float`, never `int(...)` directly: these mirror
+        # nullable columns, so None is a real value meaning "not recorded" —
+        # and `int(None)` is a TypeError that would crash the whole read over
+        # one absent audit figure.
+        measured_at=_opt_int(data.get("measured_at")),
+        cognee_db_total_bytes=_opt_int(data.get("cognee_db_total_bytes")),
+        attributed_bytes=_opt_int(data.get("attributed_bytes")),
+        edge_vector_match_ratio=_opt_float(data.get("edge_vector_match_ratio")),
     )
+
+
+def _known_fields(cls: Any, values: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys the dataclass does not declare.
+
+    Version-skew tolerance, matching what hivemake-core already does on its
+    own reads. Without it, `OwnerUsage(**fields)` raises `unexpected keyword
+    argument` the moment the server adds a field and this client is pinned to
+    an older hivemake-models — turning an ADDITIVE, supposedly
+    backward-compatible server change into a hard client crash.
+    """
+    allowed = set(cls.__dataclass_fields__.keys())
+    return {k: v for k, v in values.items() if k in allowed}
+
+
+def _opt_int(value: Any) -> Optional[int]:
+    return None if value is None else int(value)
+
+
+def _opt_float(value: Any) -> Optional[float]:
+    """Coerced explicitly: DOUBLE PRECISION today, but a column switched to
+    NUMERIC would serialise as a STRING, and a str compares wrong against a
+    floor without ever raising."""
+    return None if value is None else float(value)
 
 
 def _coerce_snapshot(snap: dict[str, Any]) -> dict[str, Any]:

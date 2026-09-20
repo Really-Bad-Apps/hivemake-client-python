@@ -1872,3 +1872,76 @@ class TestAdminUsage:
 
         assert isinstance(ratio, float)
         assert ratio < 0.9
+
+    @responses.activate
+    def test_a_missing_ROUTE_is_not_reported_as_no_measurement(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """REGRESSION, found live. Two different 404s reach this method:
+        `no_successful_run` (the meter has not produced a figure) and
+        `not_found` (the route does not exist — older server, routing
+        change, typo). Collapsing them makes 'this server cannot answer'
+        indistinguishable from 'nothing has been measured'.
+
+        Observed on 2026-09-20: mcp :48 deployed ahead of server :92, and
+        the absent route surfaced as a clean 'no sweep has completed yet'.
+        """
+        responses.get(f"{BASE}/api/admin/usage",
+                      json={"error": "not_found"}, status=404)
+
+        with pytest.raises(HiveMakeNotFound):
+            client.admin_usage()
+
+    @responses.activate
+    def test_a_genuine_no_successful_run_still_returns_None(
+        self, client: HiveMakeClient,
+    ) -> None:
+        responses.get(f"{BASE}/api/admin/usage",
+                      json={"error": "no_successful_run"}, status=404)
+
+        assert client.admin_usage() is None
+
+    @responses.activate
+    def test_absent_audit_numbers_survive_as_None(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """REGRESSION. `int(data["measured_at"])` raised TypeError on None,
+        so one unrecorded audit figure crashed the entire read."""
+        responses.get(f"{BASE}/api/admin/usage", json={
+            "run_id": str(uuid4()), "method_version": "m", "owners": [],
+            "measured_at": None, "cognee_db_total_bytes": None,
+            "attributed_bytes": None, "edge_vector_match_ratio": None,
+        }, status=200)
+
+        report = client.admin_usage()
+
+        assert report.measured_at is None
+        assert report.cognee_db_total_bytes is None
+        assert report.attributed_bytes is None
+
+    @responses.activate
+    def test_an_unknown_server_field_does_not_crash_an_older_client(
+        self, client: HiveMakeClient,
+    ) -> None:
+        """REGRESSION. `OwnerUsage(**fields)` raised `unexpected keyword
+        argument` the moment the server added a field, turning an ADDITIVE
+        server change into a hard client crash. hivemake-core has guarded
+        against this on its own reads all along."""
+        responses.get(f"{BASE}/api/admin/usage", json={
+            "run_id": str(uuid4()), "method_version": "m",
+            "measured_at": 1, "cognee_db_total_bytes": 10,
+            "attributed_bytes": 6, "edge_vector_match_ratio": 0.9,
+            "some_future_report_field": "ignored",
+            "owners": [{
+                "owner_user_id": str(uuid4()), "owner_email": "a@b.com",
+                "measured_at": 1, "total_bytes": 1, "exact_bytes": 1,
+                "apportioned_bytes": 0, "includes_graph_store": False,
+                "some_future_owner_field": "ignored",
+                "hives": [],
+            }],
+        }, status=200)
+
+        report = client.admin_usage()
+
+        assert len(report.owners) == 1
+        assert report.owners[0].owner_email == "a@b.com"
