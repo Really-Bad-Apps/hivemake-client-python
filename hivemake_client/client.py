@@ -73,35 +73,38 @@ DEFAULT_TIMEOUT = 30.0
 #
 # This is a duration ordering, NOT request topology. gunicorn actually sits
 # inside nginx, not outside this client; reading the list as literal nesting
-# is how someone later concludes nginx should be raised above 90s. What must
+# is how someone later concludes nginx should be raised above 150s. What must
 # hold is the ordering of the numbers, whatever the call graph looks like:
 #
-#   cognee GRAPH_COMPLETION   ~31s   (measured 2026-09-20: 29-35s)
-#   core -> cognee            50s    (COGNEE_COMPLETION_TIMEOUT_S)
-#   apollo nginx proxy_read   ~60s?  (UNVERIFIED — see below)
-#   THIS client -> server     75s
-#   gunicorn worker kill      90s    (hivemake-server/Dockerfile --timeout)
+#   cognee GRAPH_COMPLETION   ~54s   (measured 2026-09-20: 52.4-55.6s)
+#   core -> cognee            75s    (COGNEE_COMPLETION_TIMEOUT_S)
+#   apollo nginx proxy_read  100s    (confirmed by apollo-admin-agent)
+#   THIS client -> server    120s
+#   gunicorn worker kill     150s    (hivemake-server/Dockerfile --timeout)
 #
 # Each layer must outlast the one inside it. When an inner budget is the
 # one that expires, the server catches it and returns a handled response;
 # when an OUTER budget expires first, the inner layer's error handling is
 # skipped entirely and the caller gets a bare disconnect instead.
 #
-# The nginx row is the honest gap. apollo's vhost for api.hivemake.ai is
-# not in any repo here, so its `proxy_read_timeout` is assumed to be the
-# nginx default of 60s rather than known. That assumption is why the core
-# budget is 50s and not higher: 50s keeps the server answering before any
-# plausible proxy cut. 75s here deliberately sits ABOVE that assumed 60s
-# so that if nginx does cut first, this client is still waiting and
-# receives nginx's 504 — a diagnosable status — rather than hanging up on
-# its own and reporting a generic client-side timeout.
+# The nginx row was an assumption and is now a fact: apollo-admin-agent
+# confirmed on 2026-09-20 that the api.hivemake.ai vhost set no
+# proxy_read_timeout at all and inherited nginx's 60s default. It was
+# raised to 100s as part of this ladder.
 #
-# 30s here would have made the server-side fix a complete no-op: the
-# server would work for 31s and this client would hang up at 30. That is
-# how the original bug survived — a timeout was correct at every layer
-# anyone looked at, and wrong in the composition. If you change any number
-# in that table, re-check the whole table.
-RECALL_TIMEOUT = 75.0
+# 120s here sits ABOVE that proxy cut on purpose, so if nginx does fire
+# first this client is still waiting and receives its 504 — a diagnosable
+# status — rather than hanging up on its own and reporting a generic
+# client-side timeout with no server-side trace.
+#
+# THE WHOLE TABLE MOVED ONCE ALREADY, for a reason worth remembering. The
+# first version used 31s for cognee, from calls that sent ONE dataset. A
+# real caller sends its whole visible hive set, which is ~54s at five
+# hives and grows ~5.3s per additional hive. Every budget above it was
+# therefore sized against a workload that does not exist, and recall
+# shipped still-broken. If you change any number here, re-measure the
+# BOTTOM row with a realistic payload first — the rest follow from it.
+RECALL_TIMEOUT = 120.0
 
 
 @dataclass
@@ -701,8 +704,9 @@ class HiveMakeClient:
         truth — cognee's LLM synthesis can hallucinate; do not act on
         the answer text without independent verification.
 
-        Expect this call to take ~30s or more — it waits on cognee's LLM
-        synthesis, unlike every other method here. It carries its own
+        Expect this call to take ~55s — it waits on cognee's LLM synthesis
+        across every hive the caller can see, unlike every other method
+        here, and it gets slower as more hives become visible. It carries its own
         `RECALL_TIMEOUT` budget for that reason; see the constant for the
         full nesting of timeouts this sits inside.
         """
