@@ -66,8 +66,13 @@ DEFAULT_BASE_URL = "https://api.hivemake.ai"
 DEFAULT_TIMEOUT = 30.0
 
 # `recall_knowledge` alone gets a longer budget, because it is the only
-# endpoint that waits on an LLM. Everything else on this API is a database
-# read and has no business taking 30s.
+# endpoint that waits on cognee doing heavy retrieval + graph work.
+# Everything else on this API is a database read and has no business
+# taking 30s.
+#
+# NOT mostly the LLM, despite the obvious guess: measured 2026-09-20,
+# retrieval and graph projection are ~49s of the ~56s and the answer model
+# is ~7s. See `hivemake_core.config.cognee_completion_timeout`.
 #
 # THE ORDERING THAT MATTERS — five budgets, SHORTEST FIRST.
 #
@@ -704,9 +709,10 @@ class HiveMakeClient:
         truth — cognee's LLM synthesis can hallucinate; do not act on
         the answer text without independent verification.
 
-        Expect this call to take ~55s — it waits on cognee's LLM synthesis
-        across every hive the caller can see, unlike every other method
-        here, and it gets slower as more hives become visible. It carries its own
+        Expect this call to take ~55s, and to get slower as more hives
+        become visible to the caller — cognee scopes its graph and vector
+        work by one tag per visible hive. Most of that time is retrieval
+        and graph projection, not the answer model. It carries its own
         `RECALL_TIMEOUT` budget for that reason; see the constant for the
         full nesting of timeouts this sits inside.
         """
