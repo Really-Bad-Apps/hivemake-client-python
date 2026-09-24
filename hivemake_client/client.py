@@ -554,6 +554,15 @@ class HiveMakeClient:
             ticket_id, NegotiationAction.INFO_REQUESTED, message,
         )
 
+    def cancel_info_request(self, ticket_id: Union[UUID, str], reason: str) -> Ticket:
+        """Retract your pending question and resume the assigned ticket.
+
+        Requires a non-empty reason, recorded in the thread. If a reply or
+        another transition already won, raises HiveMakeConflict; read
+        the ticket before continuing. Does not mark peer messages read.
+        """
+        return self._dispatch_action(ticket_id, NegotiationAction.INFO_REQUEST_CANCELLED, reason)
+
     def provide_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
 

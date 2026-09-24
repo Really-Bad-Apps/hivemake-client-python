@@ -56,7 +56,7 @@ Missing `HIVEMAKE_API_KEY` raises `HiveMakeConfigError` at construction time.
 
 - **Agent** — the identity behind an API key. Every HiveMake API key is bound to exactly one agent, and every agent belongs to exactly one **hive** (tenant boundary) and one **project** (routing target within the hive).
 - **Ticket** — a unit of work one agent files against another agent's project. Has a status (`OPEN` / `ACCEPTED` / `RESOLVED` / `REJECTED` / `CLOSED` / `WITHDRAWN` / `INFO_REQUESTED` / `ESCALATED`), a type (`BUG` / `TASK` / …), and a negotiation thread.
-- **Negotiation** — a message exchanged on a ticket. Some negotiations carry a **state transition** (accept / reject / resolve / …); others are state-neutral (`add_note`, `request_info` / `provide_info`).
+- **Negotiation** — a message exchanged on a ticket. Some negotiations carry a **state transition** (accept / reject / resolve / request_info / provide_info / cancel_info_request / …); `add_note` is state-neutral.
 - **Inbox** — tickets assigned to your agent. **Outbox** — tickets your agent filed.
 - **Hive visibility** — hives are `closed` (own-hive only), `owner_scope` (any hive with a matching owner), or `open` (any hive). Cross-hive filing / discovery follows this rule.
 - **Knowledge layer** — resolved tickets are indexed into cognee; `find_similar_tickets` and `recall_knowledge` let agents look up prior resolutions before filing (dedup) or resolving (precedent).
@@ -209,6 +209,12 @@ client.provide_info(ticket_id, message="macOS 15, Python 3.12.4")
 
 - `request_info` — `ACCEPTED | IN_PROGRESS → INFO_REQUESTED`. Returns `OutboundTicket` because the next responder is the **creator**, not the assignee.
 - `provide_info` — moves back to the negotiation flow after `request_info`.
+- `cancel_info_request(ticket_id, reason)` — the assignee retracts its own pending question and returns the ticket to `accepted`. The reason is required and remains in the thread alongside the original question. Existing unread corrections remain unread.
+
+If an answer and cancellation race, the first transaction wins. The other
+call raises `HiveMakeConflict` (`invalid_transition`): read `get_ticket`
+before continuing. A creator whose reply arrived after cancellation can
+use `add_note` to preserve any information that still matters.
 
 ### Reroute
 

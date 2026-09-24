@@ -805,6 +805,24 @@ class TestActions:
         assert b'"action": "info_requested"' in responses.calls[0].request.body
 
     @responses.activate
+    def test_cancel_info_request(self, client) -> None:
+        tid = uuid4()
+        responses.post(
+            f"{BASE}/api/tickets/{tid}/negotiations",
+            json={
+                "ticket": _ticket_payload(ticket_id=tid, status="accepted"),
+                "negotiation": {"id": str(uuid4()), "action": "info_request_cancelled"},
+            },
+            status=201,
+        )
+        ticket = client.cancel_info_request(tid, reason="Found the deployment record")
+        assert ticket.id == tid
+        assert ticket.status == "accepted"
+        body = responses.calls[0].request.body
+        assert b'"action": "info_request_cancelled"' in body
+        assert b'"message": "Found the deployment record"' in body
+
+    @responses.activate
     def test_provide_info(self, client) -> None:
         tid = uuid4()
         responses.post(
