@@ -44,6 +44,8 @@ from hivemake_models import (
     UnreadTicket,
     UsageReport,
     WaitingParty,
+    validate_not_before,
+    validate_scheduled_offset,
 )
 
 from hivemake_client.exceptions import (
@@ -124,6 +126,7 @@ class FileTicketRequest:
     description: str
     priority: Union[TicketPriority, str] = TicketPriority.MEDIUM
     message: str = ""
+    not_before: Optional[int] = None
 
 
 @dataclass
@@ -160,6 +163,7 @@ class TicketDetail:
     creator_agent_name: Optional[str] = None
     assigned_agent_name: Optional[str] = None
     waiting_on_last_seen_seconds: Optional[int] = None
+    is_scheduled: bool = False
 
 
 # UUID-typed fields on the Ticket dataclass. The server emits these as
@@ -231,6 +235,14 @@ class HiveMakeClient:
             "priority": str(request.priority),
             "message": request.message,
         }
+        if request.not_before is not None:
+            validate_not_before(request.not_before)
+            # Older request schemas silently ignore unknown fields. Never send
+            # a scheduled filing to one: it would become immediate work.
+            health = self._request("GET", "/api/health", expect=200)
+            if "scheduled_tickets" not in health.get("capabilities", []):
+                raise HiveMakeConfigError("Server does not support scheduled tickets; no ticket was filed")
+            body["not_before"] = request.not_before
         data = self._request("POST", "/api/tickets", json_body=body, expect=201)
         return _outbound_from_payload(data)
 
@@ -259,12 +271,13 @@ class HiveMakeClient:
                 _history_from_payload(h) for h in data.get("history", [])
             ],
             waiting_on=_waiting_party(waiting_on_raw),
+            is_scheduled=bool(data.get("is_scheduled", False)),
             creator_agent_name=_agent_name(data.get("creator_agent")),
             assigned_agent_name=_agent_name(data.get("assigned_agent")),
             waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
         )
 
-    def check_tickets(self) -> CheckTicketsResult:
+    def check_tickets(self, scheduled_offset: int = 0) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
 
         Buckets:
@@ -317,10 +330,11 @@ class HiveMakeClient:
         sessions an agent forgets it escalated something, gets a clean
         "nothing for you", and the work sits.
 
-        Takes no filters on purpose: "what needs me?" has one answer.
+        scheduled_offset pages only the creator's scheduled backlog; it
+        never hides or filters the other buckets.
 
         Returns `CheckTicketsResult`. On overflow, `too_many=True` and all
-        five bucket lists are empty — a partial answer you couldn't detect
+        six bucket lists are empty — a partial answer you couldn't detect
         would be worse than none — but `digest` then carries a compact index
         (id, truncated title, status, bucket) of everything that would have
         been in them, so the caller can pick one and `get_ticket` it.
@@ -329,14 +343,17 @@ class HiveMakeClient:
 
         Note the `.get(..., [])` defaults below: they keep a NEW client
         readable against an OLD server, which returns no such keys. Buckets
-        come back silently empty rather than raising KeyError — matching the
-        server-first deploy order this repo uses. Consequence worth knowing:
+        come back silently empty rather than raising KeyError. Consequence worth knowing:
         an empty `escalated` against an old server means "this server does
         not say", not "no escalations", exactly as `waiting_on is None` does
         on `get_ticket`.
         """
-        data = self._request("GET", "/api/tickets/check", expect=200)
+        validate_scheduled_offset(scheduled_offset)
+        params = {"scheduled_offset": str(scheduled_offset)} if scheduled_offset else None
+        data = self._request("GET", "/api/tickets/check", params=params, expect=200)
         return CheckTicketsResult(
+            scheduled=[_ticket_from_payload(t) for t in data.get("scheduled", [])],
+            scheduled_truncated=bool(data.get("scheduled_truncated", False)),
             inbox=[_ticket_from_payload(t) for t in data.get("inbox", [])],
             self_assigned=[
                 _ticket_from_payload(t) for t in data.get("self_assigned", [])
@@ -506,6 +523,15 @@ class HiveMakeClient:
         The creator needs to know why no work will happen — "duplicate
         of #N", "obsolete", "scope changed," etc."""
         return self._dispatch_action(ticket_id, NegotiationAction.CLOSED, message)
+
+    def reschedule(self, ticket_id: Union[UUID, str], not_before: Optional[int],
+                   message: str = "") -> OutboundTicket:
+        """Creator-only update while scheduled. UTC epoch seconds; null releases now."""
+        validate_not_before(not_before)
+        data = self._request("POST", f"/api/tickets/{ticket_id}/negotiations",
+                             json_body={"action": "rescheduled", "not_before": not_before,
+                                        "message": message}, expect=201)
+        return _outbound_from_payload(data)
 
     def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Creator cancels their own ticket. OPEN | ACCEPTED → WITHDRAWN.
@@ -1093,6 +1119,7 @@ def _outbound_from_payload(payload: dict[str, Any]) -> OutboundTicket:
     return OutboundTicket(
         ticket=_ticket_from_payload(payload["ticket"]),
         waiting_on_autonomous=bool(payload["waiting_on_autonomous"]),
+        is_scheduled=bool(payload.get("is_scheduled", False)),
         suggested_poll_interval_seconds=payload.get("suggested_poll_interval_seconds"),
         waiting_on_last_seen_seconds=payload.get("waiting_on_last_seen_seconds"),
     )
