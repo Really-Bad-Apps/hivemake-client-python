@@ -209,3 +209,30 @@ def test_async_configuration_matches_sync(monkeypatch):
         async with AsyncHiveMakeClient(api_key='explicit',base_url=BASE) as client:
             assert client.api_key == 'explicit' and client.base_url == BASE
     asyncio.run(run())
+
+
+def test_owned_transport_cleanup_finishes_inside_cancelled_scope(monkeypatch):
+    import anyio
+
+    class CheckpointTransport(httpx.AsyncBaseTransport):
+        closed = False
+
+        async def handle_async_request(self, request):
+            return httpx.Response(200, json={})
+
+        async def aclose(self):
+            await anyio.sleep(0)
+            self.closed = True
+
+    async def run():
+        transport = CheckpointTransport()
+        http = httpx.AsyncClient(transport=transport)
+        monkeypatch.setattr(httpx, 'AsyncClient', lambda: http)
+        with anyio.CancelScope() as scope:
+            async with AsyncHiveMakeClient(api_key='test') as client:
+                scope.cancel()
+                await anyio.sleep(0)
+        assert transport.closed
+        assert client._closed
+
+    asyncio.run(run())

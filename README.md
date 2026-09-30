@@ -79,7 +79,9 @@ configure custom retrying transports for writes without an idempotency strategy.
 
 API status errors use the same `HiveMake*` exceptions as the synchronous client.
 Network errors use HTTPX exceptions (including `ReadTimeout` and `PoolTimeout`);
-cancellation propagates to the awaiting caller. Cancellation or a transport error
+cancellation propagates to the awaiting caller. Closing an owned transport is
+shielded from AnyIO cancellation so context-manager cleanup can finish.
+Cancellation or a transport error
 after a write was sent does not establish whether the server committed it.
 
 The default timeout remains 30 seconds, with a 120-second override for recall.

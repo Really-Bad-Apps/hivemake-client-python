@@ -10,6 +10,7 @@ import os
 from typing import Any, Optional, Union
 from uuid import UUID
 
+import anyio
 import httpx
 
 from hivemake_models import (
@@ -82,7 +83,10 @@ class AsyncHiveMakeClient:
 
     async def aclose(self) -> None:
         if self._owns_http_client:
-            await self._http_client.aclose()
+            # Context-manager exit often runs inside an already-cancelled
+            # AnyIO scope. Let transport cleanup finish before propagating it.
+            with anyio.CancelScope(shield=True):
+                await self._http_client.aclose()
         self._closed = True
 
     async def _request(
