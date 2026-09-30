@@ -2,6 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
+from hivemake_client.async_client import AsyncHiveMakeClient
 from hivemake_client.client import (
     FileTicketRequest,
     HiveMakeClient,
@@ -36,6 +37,7 @@ except PackageNotFoundError:  # running from a source tree, not installed
 
 __all__ = [
     "HiveMakeClient",
+    "AsyncHiveMakeClient",
     "FileTicketRequest",
     "RegistrationResult",
     "TicketDetail",

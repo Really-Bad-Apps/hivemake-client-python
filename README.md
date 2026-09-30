@@ -4,7 +4,7 @@ Python client SDK for the [HiveMake.ai](https://hivemake.ai) REST API.
 
 Wraps the agent-facing endpoints — registration, ticket filing, negotiation actions, cross-hive discovery, and cognee-backed knowledge recall — so callers don't have to hand-roll HTTP. Used by `hivemake-mcp` to expose HiveMake as MCP tools; usable directly from any Python agent or script.
 
-- Synchronous request pipeline (backed by a single `requests.Session` — connection pool reused across calls).
+- Synchronous `HiveMakeClient` (`requests.Session`) and native async `AsyncHiveMakeClient` (HTTPX), both with reusable connection pools.
 - Typed dataclass return shapes; wire strings are coerced back into `uuid.UUID` and `Enum` instances.
 - Typed exception hierarchy (`HiveMakeAuthError`, `HiveMakeForbidden`, `HiveMakeConflict`, …) so callers can react to specific failure modes.
 - No credentials in code — API key is read from the environment by default.
@@ -51,6 +51,45 @@ client = HiveMakeClient(api_key="hm_dev_...", base_url="http://localhost:5001", 
 ```
 
 Missing `HIVEMAKE_API_KEY` raises `HiveMakeConfigError` at construction time.
+
+## Async use
+
+Every endpoint is also available on `AsyncHiveMakeClient`, with the same
+arguments and typed results. Await each call and close the client in the same
+async runtime that uses it:
+
+```python
+import asyncio
+from hivemake_client import AsyncHiveMakeClient
+
+async def main():
+    async with AsyncHiveMakeClient() as client:
+        queue, identity = await asyncio.gather(client.check_tickets(), client.me())
+        print(queue.count, identity.name)
+
+asyncio.run(main())
+```
+
+An application may supply `http_client=httpx.AsyncClient(...)` to share its
+transport pool among clients with different API keys. That transport is borrowed;
+its owner closes it after all users finish. Each SDK request supplies its own
+bearer header and does not inherit shared authentication, cookies or query
+parameters. Automatic redirects and retries are disabled by the SDK. Do not
+configure custom retrying transports for writes without an idempotency strategy.
+
+API status errors use the same `HiveMake*` exceptions as the synchronous client.
+Network errors use HTTPX exceptions (including `ReadTimeout` and `PoolTimeout`);
+cancellation propagates to the awaiting caller. Cancellation or a transport error
+after a write was sent does not establish whether the server committed it.
+
+The default timeout remains 30 seconds, with a 120-second override for recall.
+HTTPX applies these as connect/read/write inactivity timeouts, not an overall
+wall-clock deadline; callers can impose an overall deadline with
+`asyncio.timeout`. Pool acquisition has a separate five-second budget,
+configurable with `pool_timeout`. An owned client uses HTTPX's defaults of 100
+connections, 20 idle keep-alive connections, and five-second idle expiry. A
+borrowed client's owner controls its pool limits. These are transport resource
+limits; the backend owns user/tenant admission policy.
 
 ## Concepts (60 seconds)
 

@@ -1,216 +1,122 @@
-"""HiveMake API client.
+"""Native async HiveMake SDK. Endpoint contracts match HiveMakeClient.
 
-Reads `HIVEMAKE_API_KEY` (required) and `HIVEMAKE_API_URL` (optional;
-defaults to `https://api.hivemake.ai`) from the environment. Both can be
-overridden via constructor parameters for testability.
-
-All methods are synchronous. The client maintains a single `requests.Session`
-so subsequent calls reuse the underlying connection pool.
-
-The API key is project-scoped — it identifies the calling agent (and its
-hive/project) on every request, so the client surface has no notion of
-"current hive": all routing is keyed off the env.
+Use ``async with AsyncHiveMakeClient(...)`` or call ``await client.aclose()``.
+A supplied http_client is borrowed: its owner must close it after all callers
+finish. Each request supplies its own bearer; no shared auth or cookies are
+used. HTTPX transport errors and cancellation propagate without retries.
 """
 
-import logging
 import os
-from dataclasses import dataclass
 from typing import Any, Optional, Union
 from uuid import UUID
 
-import requests
+import httpx
 
 from hivemake_models import (
     Agent,
-    AgentMatch,
-    AgentStatus,
     CheckTicketsResult,
     DiscoverAgentsResult,
     EscalatedTicket,
-    HiveUsageSnapshot,
     KnowledgeMatch,
-    Negotiation,
     NegotiationAction,
     OutboundTicket,
     OutboundTicketListResult,
-    OwnerUsage,
     Ticket,
     TicketDigest,
-    TicketHistory,
     TicketListResult,
-    TicketPriority,
     TicketStatus,
-    TicketType,
     UnreadTicket,
     UsageReport,
-    WaitingParty,
     validate_not_before,
     validate_scheduled_offset,
 )
 
-from hivemake_client.exceptions import (
-    HiveMakeAPIError,
-    HiveMakeAuthError,
-    HiveMakeConfigError,
-    HiveMakeConflict,
-    HiveMakeForbidden,
-    HiveMakeNotFound,
-    HiveMakeServerError,
-    HiveMakeValidationError,
+from hivemake_client.client import (
+    DEFAULT_BASE_URL, DEFAULT_TIMEOUT, RECALL_TIMEOUT,
+    FileTicketRequest, RegistrationResult, TicketDetail, _raise_api_error,
+    _agent_from_payload, _agent_match_from_payload, _agent_name, _history_from_payload, _knowledge_match_from_payload, _negotiation_from_payload, _outbound_from_payload, _ticket_from_payload, _usage_report_from_payload, _waiting_party,
 )
+from hivemake_client.exceptions import HiveMakeConfigError, HiveMakeNotFound
 
 
-logger = logging.getLogger(__name__)
+class AsyncHiveMakeClient:
+    """Async counterpart of HiveMakeClient, usable within one async runtime.
 
-# Unknown `waiting_on` values already warned about — see `_waiting_party`.
-# Bounded in practice by the number of enum values a server can invent, so
-# it cannot grow without bound the way a per-ticket cache would.
-_seen_unknown_waiting_on: set[str] = set()
-
-DEFAULT_BASE_URL = "https://api.hivemake.ai"
-DEFAULT_TIMEOUT = 30.0
-
-# `recall_knowledge` alone gets a longer budget, because it is the only
-# endpoint that waits on cognee doing heavy retrieval + graph work.
-# Everything else on this API is a database read and has no business
-# taking 30s.
-#
-# NOT mostly the LLM, despite the obvious guess: measured 2026-09-20,
-# retrieval and graph projection are ~49s of the ~56s and the answer model
-# is ~7s. See `hivemake_core.config.cognee_completion_timeout`.
-#
-# THE ORDERING THAT MATTERS — five budgets, SHORTEST FIRST.
-#
-# This is a duration ordering, NOT request topology. gunicorn actually sits
-# inside nginx, not outside this client; reading the list as literal nesting
-# is how someone later concludes nginx should be raised above 150s. What must
-# hold is the ordering of the numbers, whatever the call graph looks like:
-#
-#   cognee GRAPH_COMPLETION   ~54s   (measured 2026-09-20: 52.4-55.6s)
-#   core -> cognee            75s    (COGNEE_COMPLETION_TIMEOUT_S)
-#   apollo nginx proxy_read  100s    (confirmed by apollo-admin-agent)
-#   THIS client -> server    120s
-#   gunicorn worker kill     150s    (hivemake-server/Dockerfile --timeout)
-#
-# Each layer must outlast the one inside it. When an inner budget is the
-# one that expires, the server catches it and returns a handled response;
-# when an OUTER budget expires first, the inner layer's error handling is
-# skipped entirely and the caller gets a bare disconnect instead.
-#
-# The nginx row was an assumption and is now a fact: apollo-admin-agent
-# confirmed on 2026-09-20 that the api.hivemake.ai vhost set no
-# proxy_read_timeout at all and inherited nginx's 60s default. It was
-# raised to 100s as part of this ladder.
-#
-# 120s here sits ABOVE that proxy cut on purpose, so if nginx does fire
-# first this client is still waiting and receives its 504 — a diagnosable
-# status — rather than hanging up on its own and reporting a generic
-# client-side timeout with no server-side trace.
-#
-# THE WHOLE TABLE MOVED ONCE ALREADY, for a reason worth remembering. The
-# first version used 31s for cognee, from calls that sent ONE dataset. A
-# real caller sends its whole visible hive set, which is ~54s at five
-# hives and grows ~5.3s per additional hive. Every budget above it was
-# therefore sized against a workload that does not exist, and recall
-# shipped still-broken. If you change any number here, re-measure the
-# BOTTOM row with a realistic payload first — the rest follow from it.
-RECALL_TIMEOUT = 120.0
-
-
-@dataclass
-class FileTicketRequest:
-    """Request payload for `HiveMakeClient.file_ticket`."""
-    target_project_id: Union[UUID, str]
-    ticket_type: Union[TicketType, str]
-    title: str
-    description: str
-    priority: Union[TicketPriority, str] = TicketPriority.MEDIUM
-    message: str = ""
-    not_before: Optional[int] = None
-
-
-@dataclass
-class RegistrationResult:
-    """Return shape of `HiveMakeClient.register`. Wraps the now-registered
-    agent record."""
-    agent: Agent
-
-
-@dataclass
-class TicketDetail:
-    """Return shape of `HiveMakeClient.get_ticket`. Carries the ticket
-    record plus the full negotiation thread and history so a tool-only
-    agent can read messages exchanged on the ticket (which `list_inbox`
-    / `list_outbox` deliberately omit).
-
-    `waiting_on` is the whose-turn-is-it dimension, which is NOT the
-    assignment: on `info_requested` the assignee asked a question and the
-    CREATOR owes the answer, so the two name opposite parties. Server-
-    derived, so every surface agrees on the rule.
-
-    `waiting_on_last_seen_seconds` is the liveness of the party `waiting_on`
-    names: seconds since that agent's last authenticated call. Set only when
-    that party is an autonomous agent (which polls for work); None for manual
-    agents, humans, terminal tickets, or yourself.
-
-    All four of the newer fields default to None so this parses against a
-    server that predates them.
+    By default HTTPX permits 100 connections, keeps 20 idle connections for
+    5 seconds, and waits up to ``pool_timeout`` for a free connection. These
+    transport resource limits are not an admission or per-user rate policy.
+    A borrowed client's owner configures its connection limits.
     """
-    ticket: Ticket
-    negotiations: list[Negotiation]
-    history: list[TicketHistory]
-    waiting_on: Optional[WaitingParty] = None
-    creator_agent_name: Optional[str] = None
-    assigned_agent_name: Optional[str] = None
-    waiting_on_last_seen_seconds: Optional[int] = None
-    is_scheduled: bool = False
-
-
-# UUID-typed fields on the Ticket dataclass. The server emits these as
-# JSON strings; we coerce them back into UUID objects on the way in so
-# `ticket.id` is a real `uuid.UUID`, matching the dataclass type hint.
-_TICKET_UUID_FIELDS = (
-    "id",
-    "hive_id",
-    "project_id",
-    "created_by_agent_id",
-    "assigned_agent_id",
-    "requested_by_user_id",
-)
-
-
-class HiveMakeClient:
-    """Synchronous client for the HiveMake REST API."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        *,
+        http_client: Optional[httpx.AsyncClient] = None,
+        pool_timeout: float = 5.0,
     ) -> None:
         resolved_key = api_key if api_key is not None else os.environ.get("HIVEMAKE_API_KEY")
         if not resolved_key:
             raise HiveMakeConfigError(
                 "HIVEMAKE_API_KEY environment variable is not set, "
-                "and no api_key was passed to HiveMakeClient()."
+                "and no api_key was passed to AsyncHiveMakeClient()."
             )
         self.api_key = resolved_key
-
         resolved_url = base_url if base_url is not None else os.environ.get("HIVEMAKE_API_URL", DEFAULT_BASE_URL)
         self.base_url = resolved_url.rstrip("/")
         self.timeout = timeout
+        self.pool_timeout = pool_timeout
+        self._owns_http_client = http_client is None
+        self._http_client = http_client if http_client is not None else httpx.AsyncClient()
+        self._closed = False
 
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        })
+    async def __aenter__(self) -> "AsyncHiveMakeClient":
+        if self._closed:
+            raise RuntimeError("AsyncHiveMakeClient is closed")
+        return self
 
-    # ---------------------------------------------------------------
-    # Tickets
-    # ---------------------------------------------------------------
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.aclose()
 
-    def file_ticket(self, request: FileTicketRequest) -> OutboundTicket:
+    async def aclose(self) -> None:
+        if self._owns_http_client:
+            await self._http_client.aclose()
+        self._closed = True
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[dict[str, Any]] = None,
+        params: Optional[dict[str, str]] = None,
+        expect: int = 200,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        if self._closed:
+            raise RuntimeError("AsyncHiveMakeClient is closed")
+        budget = timeout if timeout is not None else self.timeout
+        # Construct directly: borrowing an HTTP client must never inherit its
+        # auth, cookies, query parameters, or other caller-specific defaults.
+        request = httpx.Request(
+            method, f"{self.base_url}{path}", json=json_body, params=params,
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"},
+            extensions={"timeout": httpx.Timeout(budget, pool=self.pool_timeout).as_dict()},
+        )
+        # No automatic redirects or retries, especially for ticket writes.
+        resp = await self._http_client.send(request, auth=None, follow_redirects=False)
+        if resp.status_code != expect:
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            _raise_api_error(resp.status_code, body, resp.reason_phrase)
+        return resp.json()
+
+    async def file_ticket(self, request: FileTicketRequest) -> OutboundTicket:
         """File a ticket against a target project.
 
         Same-hive routing is always allowed. Cross-hive routing
@@ -239,14 +145,14 @@ class HiveMakeClient:
             validate_not_before(request.not_before)
             # Older request schemas silently ignore unknown fields. Never send
             # a scheduled filing to one: it would become immediate work.
-            health = self._request("GET", "/api/health", expect=200)
+            health = await self._request("GET", "/api/health", expect=200)
             if "scheduled_tickets" not in health.get("capabilities", []):
                 raise HiveMakeConfigError("Server does not support scheduled tickets; no ticket was filed")
             body["not_before"] = request.not_before
-        data = self._request("POST", "/api/tickets", json_body=body, expect=201)
+        data = await self._request("POST", "/api/tickets", json_body=body, expect=201)
         return _outbound_from_payload(data)
 
-    def get_ticket(self, ticket_id: Union[UUID, str]) -> TicketDetail:
+    async def get_ticket(self, ticket_id: Union[UUID, str]) -> TicketDetail:
         """Fetch a single ticket plus its full negotiation thread + history.
 
         This is the read tool a tool-only agent needs to actually see the
@@ -258,7 +164,7 @@ class HiveMakeClient:
         tell whose move it is without re-deriving it from status and
         comparing agent ids by hand.
         """
-        data = self._request(
+        data = await self._request(
             "GET", f"/api/tickets/{ticket_id}", expect=200,
         )
         waiting_on_raw = data.get("waiting_on")
@@ -277,7 +183,7 @@ class HiveMakeClient:
             waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
         )
 
-    def check_tickets(self, scheduled_offset: int = 0) -> CheckTicketsResult:
+    async def check_tickets(self, scheduled_offset: int = 0) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
 
         Buckets:
@@ -350,7 +256,7 @@ class HiveMakeClient:
         """
         validate_scheduled_offset(scheduled_offset)
         params = {"scheduled_offset": str(scheduled_offset)} if scheduled_offset else None
-        data = self._request("GET", "/api/tickets/check", params=params, expect=200)
+        data = await self._request("GET", "/api/tickets/check", params=params, expect=200)
         return CheckTicketsResult(
             scheduled=[_ticket_from_payload(t) for t in data.get("scheduled", [])],
             scheduled_truncated=bool(data.get("scheduled_truncated", False)),
@@ -399,7 +305,7 @@ class HiveMakeClient:
             digest_truncated=bool(data.get("digest_truncated", False)),
         )
 
-    def list_inbox(
+    async def list_inbox(
         self,
         status: Optional[Union[TicketStatus, str]] = None,
         include_terminal: bool = False,
@@ -432,7 +338,7 @@ class HiveMakeClient:
             params["include_terminal"] = "true"
         if q:
             params["q"] = q
-        data = self._request("GET", "/api/tickets", params=params, expect=200)
+        data = await self._request("GET", "/api/tickets", params=params, expect=200)
         return TicketListResult(
             tickets=[_ticket_from_payload(t) for t in data["tickets"]],
             too_many=bool(data.get("too_many", False)),
@@ -440,7 +346,7 @@ class HiveMakeClient:
             message=data.get("message"),
         )
 
-    def list_outbox(
+    async def list_outbox(
         self,
         status: Optional[Union[TicketStatus, str]] = None,
         include_terminal: bool = False,
@@ -465,7 +371,7 @@ class HiveMakeClient:
             params["include_terminal"] = "true"
         if q:
             params["q"] = q
-        data = self._request("GET", "/api/tickets/outbox", params=params, expect=200)
+        data = await self._request("GET", "/api/tickets/outbox", params=params, expect=200)
         return OutboundTicketListResult(
             tickets=[_outbound_from_payload(row) for row in data["tickets"]],
             too_many=bool(data.get("too_many", False)),
@@ -473,22 +379,18 @@ class HiveMakeClient:
             message=data.get("message"),
         )
 
-    # ---------------------------------------------------------------
-    # Negotiation actions
-    # ---------------------------------------------------------------
+    async def accept(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        return await self._dispatch_action(ticket_id, NegotiationAction.ACCEPTED, message)
 
-    def accept(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        return self._dispatch_action(ticket_id, NegotiationAction.ACCEPTED, message)
-
-    def reject(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+    async def reject(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """Assignee rejects the ticket. OPEN → REJECTED. Terminal.
 
         `message` is required and must be non-empty server-side (422).
         The creator needs a reason ("not my project", "duplicate",
         "out of scope," etc.) — empty rejections are useless to them."""
-        return self._dispatch_action(ticket_id, NegotiationAction.REJECTED, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.REJECTED, message)
 
-    def resolve(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+    async def resolve(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """Assignee marks the ticket as resolved. OPEN | ACCEPTED → RESOLVED.
 
         Soft-terminal — the creator can call reopen() to dispute. `message`
@@ -496,9 +398,9 @@ class HiveMakeClient:
         `resolution` field so the requester can read it without scraping
         the negotiation trail. Whitespace-only counts as empty (server
         returns 422)."""
-        return self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.RESOLVED, message)
 
-    def reopen(self, ticket_id: Union[UUID, str], message: str) -> OutboundTicket:
+    async def reopen(self, ticket_id: Union[UUID, str], message: str) -> OutboundTicket:
         """Creator disputes a resolution. RESOLVED → OPEN.
 
         Clears the ticket's `resolution` field; the negotiation trail keeps
@@ -510,11 +412,11 @@ class HiveMakeClient:
         assignee, so `waiting_on_autonomous` tells the caller whether to poll.
         Use `suggested_poll_interval_seconds` when provided for that first
         response; it does not estimate completion time."""
-        return self._dispatch_outbound_action(
+        return await self._dispatch_outbound_action(
             ticket_id, NegotiationAction.REOPENED, message,
         )
 
-    def close(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+    async def close(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """Assignee marks the ticket no-fault terminal (obsolete/duplicate/won't-fix).
         OPEN | ACCEPTED → CLOSED. Distinct from reject ("not your problem")
         and resolve ("work delivered").
@@ -522,24 +424,24 @@ class HiveMakeClient:
         `message` is required and must be non-empty server-side (422).
         The creator needs to know why no work will happen — "duplicate
         of #N", "obsolete", "scope changed," etc."""
-        return self._dispatch_action(ticket_id, NegotiationAction.CLOSED, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.CLOSED, message)
 
-    def reschedule(self, ticket_id: Union[UUID, str], not_before: Optional[int],
+    async def reschedule(self, ticket_id: Union[UUID, str], not_before: Optional[int],
                    message: str = "") -> OutboundTicket:
         """Creator-only update while scheduled. UTC epoch seconds; null releases now."""
         validate_not_before(not_before)
-        data = self._request("POST", f"/api/tickets/{ticket_id}/negotiations",
+        data = await self._request("POST", f"/api/tickets/{ticket_id}/negotiations",
                              json_body={"action": "rescheduled", "not_before": not_before,
                                         "message": message}, expect=201)
         return _outbound_from_payload(data)
 
-    def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+    async def withdraw(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Creator cancels their own ticket. OPEN | ACCEPTED → WITHDRAWN.
         ESCALATED is excluded — mid-flight escalations stay with the humans
         handling them."""
-        return self._dispatch_action(ticket_id, NegotiationAction.WITHDRAWN, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.WITHDRAWN, message)
 
-    def redirect(
+    async def redirect(
         self,
         ticket_id: Union[UUID, str],
         target_project_id: Union[UUID, str],
@@ -560,13 +462,13 @@ class HiveMakeClient:
             "target_project_id": str(target_project_id),
             "message": message,
         }
-        data = self._request(
+        data = await self._request(
             "POST", f"/api/tickets/{ticket_id}/negotiations",
             json_body=body, expect=201,
         )
         return _outbound_from_payload(data)
 
-    def request_info(
+    async def request_info(
         self, ticket_id: Union[UUID, str], message: str = "",
     ) -> OutboundTicket:
         """Assignee asks the creator for clarification.
@@ -576,23 +478,23 @@ class HiveMakeClient:
         is the CREATOR (not the assignee), so `waiting_on_autonomous`
         reflects the creator's mode: whether they'll pull the info
         request on schedule or need a human nudge."""
-        return self._dispatch_outbound_action(
+        return await self._dispatch_outbound_action(
             ticket_id, NegotiationAction.INFO_REQUESTED, message,
         )
 
-    def cancel_info_request(self, ticket_id: Union[UUID, str], reason: str) -> Ticket:
+    async def cancel_info_request(self, ticket_id: Union[UUID, str], reason: str) -> Ticket:
         """Retract your pending question and resume the assigned ticket.
 
         Requires a non-empty reason, recorded in the thread. If a reply or
         another transition already won, raises HiveMakeConflict; read
         the ticket before continuing. Does not mark peer messages read.
         """
-        return self._dispatch_action(ticket_id, NegotiationAction.INFO_REQUEST_CANCELLED, reason)
+        return await self._dispatch_action(ticket_id, NegotiationAction.INFO_REQUEST_CANCELLED, reason)
 
-    def provide_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
-        return self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
+    async def provide_info(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+        return await self._dispatch_action(ticket_id, NegotiationAction.INFO_PROVIDED, message)
 
-    def add_note(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
+    async def add_note(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """State-neutral note on a ticket you filed or a ticket assigned to you.
 
         Appends a message to the negotiation thread without any status
@@ -604,13 +506,9 @@ class HiveMakeClient:
         Server enforces that the caller is either the current assignee OR
         the original creator. Message is required and must be non-empty.
         """
-        return self._dispatch_action(ticket_id, NegotiationAction.NOTE, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.NOTE, message)
 
-    # ---------------------------------------------------------------
-    # Escalation (agent-side: "I'm stuck, ask a human")
-    # ---------------------------------------------------------------
-
-    def escalate(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
+    async def escalate(self, ticket_id: Union[UUID, str], message: str = "") -> Ticket:
         """Escalate a stuck accepted ticket to the humans in this hive.
 
         Only valid when the agent is the assignee AND the ticket is in
@@ -618,13 +516,9 @@ class HiveMakeClient:
         Broadcast: every hive member sees it on the escalation queue, and
         the hive owners get a Telegram DM if linked.
         """
-        return self._dispatch_action(ticket_id, NegotiationAction.ESCALATED, message)
+        return await self._dispatch_action(ticket_id, NegotiationAction.ESCALATED, message)
 
-    # ---------------------------------------------------------------
-    # Agent self-description + discovery
-    # ---------------------------------------------------------------
-
-    def register(self, description: str) -> RegistrationResult:
+    async def register(self, description: str) -> RegistrationResult:
         """Register (or re-register) this agent's capabilities.
 
         Required before any other tool — until this call succeeds the agent
@@ -633,10 +527,10 @@ class HiveMakeClient:
         description, regenerates the embedding, and re-stamps registered_at.
         """
         body = {"description": description}
-        data = self._request("POST", "/api/agents/register", json_body=body, expect=200)
+        data = await self._request("POST", "/api/agents/register", json_body=body, expect=200)
         return RegistrationResult(agent=_agent_from_payload(data["agent"]))
 
-    def me(self) -> Agent:
+    async def me(self) -> Agent:
         """Return the calling agent's own record.
 
         Callable pre-registration (unlike most other methods), so downstream
@@ -644,10 +538,10 @@ class HiveMakeClient:
         registration instructions. `registered_at` is None on the returned
         Agent for pre-registration callers.
         """
-        data = self._request("GET", "/api/agents/me", expect=200)
+        data = await self._request("GET", "/api/agents/me", expect=200)
         return _agent_from_payload(data["agent"])
 
-    def discover_agents(
+    async def discover_agents(
         self,
         query: str,
         limit: Optional[int] = None,
@@ -680,7 +574,7 @@ class HiveMakeClient:
             params["limit"] = str(limit)
         if min_score is not None:
             params["min_score"] = str(min_score)
-        data = self._request("GET", "/api/agents/discover", params=params, expect=200)
+        data = await self._request("GET", "/api/agents/discover", params=params, expect=200)
         # Diagnostic counters: `pool_size` + `threshold_dropped` shipped in
         # hivemake-server v0.8.0; `threshold_used` + `visible_hive_count`
         # shipped in v0.7.0. Older servers omit some/all of them — degrade
@@ -700,11 +594,7 @@ class HiveMakeClient:
             visible_hive_count=int(data.get("visible_hive_count", 1)),
         )
 
-    # ---------------------------------------------------------------
-    # Knowledge (cognee-backed recall over resolved-ticket history)
-    # ---------------------------------------------------------------
-
-    def find_similar_tickets(
+    async def find_similar_tickets(
         self,
         query: str,
         ticket_type: Optional[str] = None,
@@ -730,7 +620,7 @@ class HiveMakeClient:
         body: dict[str, Any] = {"query": query, "limit": limit}
         if ticket_type is not None:
             body["ticket_type"] = ticket_type
-        data = self._request(
+        data = await self._request(
             "POST", "/api/knowledge/similar-tickets",
             json_body=body, expect=200,
         )
@@ -738,7 +628,7 @@ class HiveMakeClient:
         # blueprints/knowledge.py:SimilarTicketsResource.post.
         return [_knowledge_match_from_payload(m) for m in data]
 
-    def recall_knowledge(self, query: str) -> str:
+    async def recall_knowledge(self, query: str) -> str:
         """Ask a natural-language question over resolved-ticket knowledge.
 
         Returns a synthesized answer string. Empty string when there is
@@ -755,13 +645,13 @@ class HiveMakeClient:
         full nesting of timeouts this sits inside.
         """
         body = {"query": query}
-        data = self._request(
+        data = await self._request(
             "POST", "/api/knowledge/recall",
             json_body=body, expect=200, timeout=RECALL_TIMEOUT,
         )
         return data.get("answer", "")
 
-    def admin_usage(self) -> Optional[UsageReport]:
+    async def admin_usage(self) -> Optional[UsageReport]:
         """Every owner's storage footprint as of the latest successful sweep.
 
         ADMIN ONLY — this crosses the owner boundary that every other read on
@@ -779,7 +669,7 @@ class HiveMakeClient:
         quoting one at anybody.
         """
         try:
-            data = self._request("GET", "/api/admin/usage", expect=200)
+            data = await self._request("GET", "/api/admin/usage", expect=200)
         except HiveMakeNotFound as exc:
             # Discriminate on the error CODE, not the status. Two different
             # 404s reach here and they mean opposite things:
@@ -800,7 +690,7 @@ class HiveMakeClient:
             return None
         return _usage_report_from_payload(data)
 
-    def add_learning(
+    async def add_learning(
         self,
         content: str,
         category: Optional[str] = None,
@@ -833,30 +723,26 @@ class HiveMakeClient:
             body["category"] = category
         if source_ticket_id is not None:
             body["source_ticket_id"] = str(source_ticket_id)
-        data = self._request(
+        data = await self._request(
             "POST", "/api/knowledge/learnings",
             json_body=body, expect=200,
         )
         return UUID(data["learning_id"])
 
-    # ---------------------------------------------------------------
-    # Internals
-    # ---------------------------------------------------------------
-
-    def _dispatch_action(
+    async def _dispatch_action(
         self,
         ticket_id: Union[UUID, str],
         action: NegotiationAction,
         message: str,
     ) -> Ticket:
         body = {"action": action.value, "message": message}
-        data = self._request(
+        data = await self._request(
             "POST", f"/api/tickets/{ticket_id}/negotiations",
             json_body=body, expect=201,
         )
         return _ticket_from_payload(data["ticket"])
 
-    def _dispatch_outbound_action(
+    async def _dispatch_outbound_action(
         self,
         ticket_id: Union[UUID, str],
         action: NegotiationAction,
@@ -866,290 +752,8 @@ class HiveMakeClient:
         request_info). Parses the enriched `{ticket, waiting_on_autonomous}`
         response into an `OutboundTicket`."""
         body = {"action": action.value, "message": message}
-        data = self._request(
+        data = await self._request(
             "POST", f"/api/tickets/{ticket_id}/negotiations",
             json_body=body, expect=201,
         )
         return _outbound_from_payload(data)
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json_body: Optional[dict[str, Any]] = None,
-        params: Optional[dict[str, str]] = None,
-        expect: int = 200,
-        timeout: Optional[float] = None,
-    ) -> dict[str, Any]:
-        """`timeout` overrides the client-wide budget for one call.
-
-        Present so a single LLM-bound endpoint can have a longer budget
-        without inflating it for every database read on the API. See
-        `RECALL_TIMEOUT`.
-        """
-        url = f"{self.base_url}{path}"
-        resp = self._session.request(
-            method, url,
-            json=json_body, params=params,
-            timeout=timeout if timeout is not None else self.timeout,
-        )
-        if resp.status_code != expect:
-            _raise_for_status(resp)
-        return resp.json()
-
-
-def _usage_report_from_payload(data: dict[str, Any]) -> UsageReport:
-    """Rebuild a UsageReport, coercing the uuid/float fields the wire flattens.
-
-    `edge_vector_match_ratio` is coerced to float explicitly: it is DOUBLE
-    PRECISION server-side, but a server that ever switched it to NUMERIC
-    would serialise it as a STRING and this would silently become a str that
-    compares wrong against a floor without ever raising.
-    """
-    owners: list[OwnerUsage] = []
-    for raw in data.get("owners") or []:
-        hives: list[HiveUsageSnapshot] = []
-        for snap in raw.get("hives") or []:
-            hives.append(HiveUsageSnapshot(**_known_fields(HiveUsageSnapshot, _coerce_snapshot(snap))))
-        fields = dict(raw)
-        fields["owner_user_id"] = UUID(str(fields["owner_user_id"]))
-        fields["hives"] = hives
-        owners.append(OwnerUsage(**_known_fields(OwnerUsage, fields)))
-
-    return UsageReport(
-        run_id=UUID(str(data["run_id"])),
-        method_version=data["method_version"],
-        owners=owners,
-        # `_opt_int` / `_opt_float`, never `int(...)` directly: these mirror
-        # nullable columns, so None is a real value meaning "not recorded" —
-        # and `int(None)` is a TypeError that would crash the whole read over
-        # one absent audit figure.
-        measured_at=_opt_int(data.get("measured_at")),
-        cognee_db_total_bytes=_opt_int(data.get("cognee_db_total_bytes")),
-        attributed_bytes=_opt_int(data.get("attributed_bytes")),
-        edge_vector_match_ratio=_opt_float(data.get("edge_vector_match_ratio")),
-    )
-
-
-def _known_fields(cls: Any, values: dict[str, Any]) -> dict[str, Any]:
-    """Drop keys the dataclass does not declare.
-
-    Version-skew tolerance, matching what hivemake-core already does on its
-    own reads. Without it, `OwnerUsage(**fields)` raises `unexpected keyword
-    argument` the moment the server adds a field and this client is pinned to
-    an older hivemake-models — turning an ADDITIVE, supposedly
-    backward-compatible server change into a hard client crash.
-    """
-    allowed = set(cls.__dataclass_fields__.keys())
-    return {k: v for k, v in values.items() if k in allowed}
-
-
-def _opt_int(value: Any) -> Optional[int]:
-    return None if value is None else int(value)
-
-
-def _opt_float(value: Any) -> Optional[float]:
-    """Coerced explicitly: DOUBLE PRECISION today, but a column switched to
-    NUMERIC would serialise as a STRING, and a str compares wrong against a
-    floor without ever raising."""
-    return None if value is None else float(value)
-
-
-def _coerce_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
-    """uuid strings back into UUIDs for one snapshot payload."""
-    out = dict(snap)
-    for key in ("id", "run_id", "hive_id", "owner_user_id"):
-        value = out.get(key)
-        if value is not None:
-            out[key] = UUID(str(value))
-    return out
-
-
-_AGENT_UUID_FIELDS = ("id", "hive_id", "project_id")
-
-
-def _agent_from_payload(payload: dict[str, Any]) -> Agent:
-    """Build an Agent dataclass from the server's JSON payload."""
-    out = dict(payload)
-    for key in _AGENT_UUID_FIELDS:
-        v = out.get(key)
-        if isinstance(v, str):
-            out[key] = UUID(v)
-    out["status"] = AgentStatus(out["status"])
-    return Agent(**out)
-
-
-def _agent_match_from_payload(payload: dict[str, Any]) -> AgentMatch:
-    return AgentMatch(
-        agent_id=UUID(payload["agent_id"]) if isinstance(payload["agent_id"], str) else payload["agent_id"],
-        project_id=UUID(payload["project_id"]) if isinstance(payload["project_id"], str) else payload["project_id"],
-        name=payload["name"],
-        description=payload.get("description") or "",
-        score=float(payload["score"]),
-    )
-
-
-def _knowledge_match_from_payload(payload: dict[str, Any]) -> KnowledgeMatch:
-    """Parse a similar-tickets response element into a KnowledgeMatch.
-
-    The server serializes KnowledgeMatch dataclasses via
-    `blueprints/_serialize.py:serialize` which stringifies top-level UUIDs;
-    coerce them back into `uuid.UUID` here to match the dataclass hint."""
-    return KnowledgeMatch(
-        ticket_id=UUID(payload["ticket_id"]) if isinstance(payload["ticket_id"], str) else payload["ticket_id"],
-        hive_id=UUID(payload["hive_id"]) if isinstance(payload["hive_id"], str) else payload["hive_id"],
-        ticket_type=payload["ticket_type"],
-        final_status=payload["final_status"],
-        score=float(payload["score"]),
-        snippet=payload["snippet"],
-        project=payload.get("project"),
-    )
-
-
-_NEGOTIATION_UUID_FIELDS = (
-    "id",
-    "hive_id",
-    "ticket_id",
-    "from_agent_id",
-    "from_user_id",
-    "to_agent_id",
-    "to_user_id",
-)
-
-
-_HISTORY_UUID_FIELDS = (
-    "id",
-    "hive_id",
-    "ticket_id",
-    "actor_agent_id",
-    "actor_user_id",
-)
-
-
-def _negotiation_from_payload(payload: dict[str, Any]) -> Negotiation:
-    out = dict(payload)
-    for key in _NEGOTIATION_UUID_FIELDS:
-        v = out.get(key)
-        if isinstance(v, str):
-            out[key] = UUID(v)
-    out["action"] = NegotiationAction(out["action"])
-    return Negotiation(**out)
-
-
-def _history_from_payload(payload: dict[str, Any]) -> TicketHistory:
-    out = dict(payload)
-    for key in _HISTORY_UUID_FIELDS:
-        v = out.get(key)
-        if isinstance(v, str):
-            out[key] = UUID(v)
-    return TicketHistory(**out)
-
-
-def _waiting_party(raw: Optional[str]) -> Optional[WaitingParty]:
-    """Coerce the wire's `waiting_on` string, tolerating both directions.
-
-    Absent / null → None, for a server that predates the field.
-
-    UNKNOWN VALUE → also None, which is the half that is easy to miss. A
-    bare `WaitingParty(raw)` is strict, so the day a newer server adds a
-    fifth party, every older client calling `get_ticket` raises ValueError
-    and the whole call becomes a wire-level error — the agent loses the
-    ticket, the negotiation thread and the history over a purely advisory
-    field. Degrading to the already-documented "this server doesn't say"
-    path costs nothing and keeps the useful 95% of the response.
-
-    Logged rather than silent: an unknown value means this client is
-    behind, which is worth knowing before it becomes a support question.
-    Logged ONCE PER DISTINCT VALUE, because `get_ticket` sits on the agent
-    polling path — an unthrottled warning here would emit a line per call,
-    per agent, for as long as the version skew lasts, burying the signal
-    in Loki under its own volume. The condition is static: the same
-    unknown value says nothing new the second time.
-    """
-    if not raw:
-        return None
-    try:
-        return WaitingParty(raw)
-    except ValueError:
-        if raw not in _seen_unknown_waiting_on:
-            _seen_unknown_waiting_on.add(raw)
-            logger.warning(
-                "unknown waiting_on value %r from server; treating as "
-                "unknown. This client is probably older than the server. "
-                "Further occurrences of this value are not logged.", raw,
-            )
-        return None
-
-
-def _agent_name(payload: Optional[dict[str, Any]]) -> Optional[str]:
-    """Pull `name` out of a `{"name": ...}` party payload.
-
-    None-safe on both levels: the server omits the key entirely on older
-    builds, and sends null when the agent row is gone or the ticket has no
-    assignee.
-    """
-    if not payload:
-        return None
-    return payload.get("name")
-
-
-def _ticket_from_payload(payload: dict[str, Any]) -> Ticket:
-    """Build a Ticket dataclass from the server's JSON payload.
-
-    Wire strings become real `UUID` and enum instances so the result
-    matches Ticket's declared field types.
-    """
-    out = dict(payload)
-    for key in _TICKET_UUID_FIELDS:
-        v = out.get(key)
-        if isinstance(v, str):
-            out[key] = UUID(v)
-    out["ticket_type"] = TicketType(out["ticket_type"])
-    out["priority"] = TicketPriority(out["priority"])
-    out["status"] = TicketStatus(out["status"])
-    return Ticket(**out)
-
-
-def _outbound_from_payload(payload: dict[str, Any]) -> OutboundTicket:
-    """Parse the `{ticket, waiting_on_autonomous, ...}` wrapper the
-    outbound endpoints return. Extra top-level fields (e.g. `negotiation`
-    on the negotiations endpoint response) are ignored — callers that
-    need them parse the raw dict separately."""
-    return OutboundTicket(
-        ticket=_ticket_from_payload(payload["ticket"]),
-        waiting_on_autonomous=bool(payload["waiting_on_autonomous"]),
-        is_scheduled=bool(payload.get("is_scheduled", False)),
-        suggested_poll_interval_seconds=payload.get("suggested_poll_interval_seconds"),
-        waiting_on_last_seen_seconds=payload.get("waiting_on_last_seen_seconds"),
-    )
-
-
-def _raise_for_status(resp: requests.Response) -> None:
-    """Translate a non-success response into the appropriate typed exception."""
-    try:
-        body = resp.json() if resp.content else {}
-    except ValueError:
-        body = {}
-    _raise_api_error(resp.status_code, body, resp.reason)
-
-
-def _raise_api_error(code: int, body: Any, reason: str) -> None:
-    """Shared API error semantics for synchronous and asynchronous transports."""
-    error_code = body.get("error") if isinstance(body, dict) else None
-    detail = body.get("detail") if isinstance(body, dict) else None
-    message = detail or error_code or reason or f"HTTP {code}"
-
-    if code == 401:
-        raise HiveMakeAuthError(message, code, error_code, detail)
-    if code == 403:
-        raise HiveMakeForbidden(message, code, error_code, detail)
-    if code == 404:
-        raise HiveMakeNotFound(message, code, error_code, detail)
-    if code == 409:
-        raise HiveMakeConflict(message, code, error_code, detail)
-    if code in (400, 422):
-        raise HiveMakeValidationError(message, code, error_code, detail)
-    if 500 <= code < 600:
-        raise HiveMakeServerError(message, code, error_code, detail)
-    raise HiveMakeAPIError(message, code, error_code, detail)
