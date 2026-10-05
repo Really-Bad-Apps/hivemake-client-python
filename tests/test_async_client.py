@@ -20,6 +20,9 @@ AGENT = dict(id=str(uuid4()), hive_id=str(uuid4()), project_id=PROJECT_ID,
              created_at=1700000000, updated_at=1700000000)
 OUTBOUND = dict(ticket=TICKET, waiting_on_autonomous=False, is_scheduled=True)
 CASES = [
+    ('get_learning', (TICKET_ID,), {}, dict(learning_id=TICKET_ID, revision=1, status='pending')),
+    ('revise_learning', (TICKET_ID, 1, 'corrected', 'reason'), {}, dict(learning_id=TICKET_ID, revision=2, status='pending')),
+    ('learning_history', (TICKET_ID,), {'before_revision': 3, 'limit': 2}, dict(revisions=[])),
     ('file_ticket', (FileTicketRequest(PROJECT_ID, 'task', 'Title', 'Description'),), {}, OUTBOUND),
     ('get_ticket', (TICKET_ID,), {}, dict(ticket=TICKET, negotiations=[], history=[], waiting_on='assignee')),
     ('check_tickets', (), {'scheduled_offset': 15}, dict(inbox=[TICKET], scheduled=[TICKET], count=2)),
@@ -235,4 +238,32 @@ def test_owned_transport_cleanup_finishes_inside_cancelled_scope(monkeypatch):
         assert transport.closed
         assert client._closed
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('operation,expected_method,path,payload', [
+    ('get_learning','GET','',{'revision':1,'status':'ready'}),
+    ('revise_learning','PATCH','',{'revision':2,'status':'pending'}),
+    ('learning_history','GET','/revisions',{'revisions':[]}),
+])
+def test_learning_wire_contract(operation, expected_method, path, payload):
+    async def run():
+        async def handler(request):
+            assert request.method == expected_method
+            assert request.url.path == f'/api/knowledge/learnings/{TICKET_ID}{path}'
+            assert request.headers['Authorization'] == 'Bearer author-token'
+            if operation == 'revise_learning':
+                assert json.loads(request.content) == {'expected_revision':1,'content':'Corrected','reason':'Reason'}
+            if operation == 'learning_history':
+                assert dict(request.url.params) == {'limit':'2','before_revision':'3'}
+            return httpx.Response(202 if operation == 'revise_learning' else 200,json=payload)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            async with AsyncHiveMakeClient(api_key='author-token',base_url=BASE,http_client=http) as client:
+                if operation == 'revise_learning':
+                    result = await client.revise_learning(TICKET_ID,1,'Corrected','Reason')
+                elif operation == 'learning_history':
+                    result = await client.learning_history(TICKET_ID,before_revision=3,limit=2)
+                else:
+                    result = await client.get_learning(TICKET_ID)
+                assert result == payload
     asyncio.run(run())

@@ -694,6 +694,39 @@ class AsyncHiveMakeClient:
             return None
         return _usage_report_from_payload(data)
 
+    async def get_learning(self, learning_id: Union[UUID, str]) -> dict[str, Any]:
+        """Read your learning's current text, revision and indexing status.
+
+        Unknown IDs and other authors' IDs both return 404. Legacy learnings
+        are unavailable until their attribution has been verified and imported.
+        """
+        return await self._request("GET", f"/api/knowledge/learnings/{learning_id}", expect=200)
+
+    async def revise_learning(
+        self, learning_id: Union[UUID, str], expected_revision: int, content: str, reason: str,
+    ) -> dict[str, Any]:
+        """Accept an author-only correction without approval; indexing is async.
+
+        Read get_learning first. A stale revision returns 409; reread before
+        deciding whether to retry. Pending/failed does not mean recall is updated.
+        """
+        return await self._request(
+            "PATCH", f"/api/knowledge/learnings/{learning_id}",
+            json_body={"expected_revision": expected_revision, "content": content, "reason": reason},
+            expect=202,
+        )
+
+    async def learning_history(
+        self, learning_id: Union[UUID, str], before_revision: Optional[int] = None, limit: int = 20,
+    ) -> dict[str, Any]:
+        """Read your revision history, newest first, with exclusive cursor pagination."""
+        params: dict[str, str] = {"limit": str(limit)}
+        if before_revision is not None:
+            params["before_revision"] = str(before_revision)
+        return await self._request(
+            "GET", f"/api/knowledge/learnings/{learning_id}/revisions", params=params, expect=200,
+        )
+
     async def add_learning(
         self,
         content: str,
@@ -708,6 +741,9 @@ class AsyncHiveMakeClient:
         the read side). Returns the server-generated `learning_id`
         immediately; the actual ingest completes in the background so
         recall may take a few seconds to surface the new content.
+
+        On deployments with learning corrections enabled, get_learning exposes
+        indexing status and revise_learning accepts author-only revisions.
 
         Content is required and capped at 50k chars (cost/noise guard,
         not a safety guard). `category` is a free-form tag (e.g.
