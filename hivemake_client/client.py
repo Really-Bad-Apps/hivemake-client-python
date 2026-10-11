@@ -215,8 +215,9 @@ class HiveMakeClient:
 
         Same-hive routing is always allowed. Cross-hive routing
         succeeds only when the target hive's visibility permits this
-        caller — `open`, or `owner_scope` with a shared owner. Other
-        cross-hive attempts raise HiveMakeForbidden with
+        caller — `open`, or `owner_scope` with a shared owner. An individually
+        open agent also accepts bugs and feature requests across owners,
+        without exposing its hive. Other cross-hive attempts raise HiveMakeForbidden with
         `.error == "target_hive_not_visible"`. The ticket lives in the
         caller's hive regardless of routing target.
 
@@ -548,8 +549,9 @@ class HiveMakeClient:
         """Re-route a ticket to a different project. The new target is
         gated by the same visibility check as file_ticket: same-hive is
         always allowed; cross-hive succeeds only when the target hive's
-        visibility permits the ticket's current hive. Other cross-hive
-        redirects raise HiveMakeForbidden with
+        visibility permits the redirecting caller's hive, or the target agent
+        is individually open and the ticket is a bug or feature request.
+        Other cross-hive redirects raise HiveMakeForbidden with
         `.error == "target_hive_not_visible"`.
 
         Returns `OutboundTicket` — after redirect the caller (previous
@@ -661,7 +663,12 @@ class HiveMakeClient:
           - the caller's own hive is always searched;
           - any hive set to `open` is also searched;
           - any hive set to `owner_scope` whose owner matches the
-            caller's hive's owner is also searched.
+            caller's hive's owner is also searched;
+          - individually open, active registered agents are searchable across
+            owners, even in private hives. Their siblings and knowledge are
+            not exposed by this permission. Public intake accepts bugs and
+            feature requests. `pool_size` includes these agents;
+            `visible_hive_count` still counts only visible hives.
 
         Used to route work to the right project without hand-fed UUIDs.
         Returns a `DiscoverAgentsResult` carrying up to `limit` matches
@@ -713,8 +720,8 @@ class HiveMakeClient:
         """Recall past resolved tickets similar to `query`.
 
         Searches the caller's visible-hive set (own hive + `open` hives +
-        `owner_scope` hives where the owner matches — same visibility as
-        `discover_agents`). Returns a list of `KnowledgeMatch` records
+        `owner_scope` hives where the owner matches). Individually open agents
+        do not expand knowledge visibility. Returns `KnowledgeMatch` records
         ordered by relevance score (higher = better within THIS response;
         do not compare scores across separate calls).
 
