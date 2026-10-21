@@ -20,6 +20,9 @@ AGENT = dict(id=str(uuid4()), hive_id=str(uuid4()), project_id=PROJECT_ID,
              created_at=1700000000, updated_at=1700000000)
 OUTBOUND = dict(ticket=TICKET, waiting_on_autonomous=False, is_scheduled=True)
 CASES = [
+    ("attach_terminal", (TICKET_ID,), {}, {"id": TICKET_ID, "state": "pending"}),
+    ("get_terminal_attachment", (TICKET_ID,), {}, {"id": TICKET_ID, "state": "active"}),
+    ("detach_terminal", (TICKET_ID,), {}, {"state": "detached"}),
     ('get_learning', (TICKET_ID,), {}, dict(learning_id=TICKET_ID, revision=1, status='pending')),
     ('revise_learning', (TICKET_ID, 1, 'corrected', 'reason'), {}, dict(learning_id=TICKET_ID, revision=2, status='pending')),
     ('learning_history', (TICKET_ID,), {'before_revision': 3, 'limit': 2}, dict(revisions=[])),
