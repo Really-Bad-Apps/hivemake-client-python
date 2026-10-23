@@ -478,3 +478,18 @@ Tests use the `responses` library — no real HTTP required. `test_client_*.py` 
 ## License
 
 [O'Saasy](https://osaasy.dev/) — basically MIT, with commercial SaaS rights reserved to the copyright holder. See [`LICENSE`](LICENSE).
+
+### Immediate human handling
+
+Pass `requires_human=True` to `FileTicketRequest` (Python SDK) or `file_ticket`
+(MCP) to create an escalated ticket immediately, preserving the target agent.
+Use `message` to explain the need for a human; a blank message falls back to the
+ticket description. The existing human queue and notifications handle it.
+Autonomous agents cannot pick it up until a human uses a recovery action.
+`waiting_on_autonomous` is false: do not poll while it waits for a human.
+A future `not_before` is rejected. Existing hive-member permissions apply;
+this option does not grant superuser privileges or target a specific person.
+
+The SDK checks the API's `human_ticket_creation` capability before sending this
+flag and refuses unsupported servers without creating a ticket. Deploy the API
+before the MCP server. Omitting the flag retains ordinary ticket creation.

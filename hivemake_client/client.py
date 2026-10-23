@@ -128,6 +128,7 @@ class FileTicketRequest:
     message: str = ""
     not_before: Optional[int] = None
     reply_attachment_id: Optional[Union[UUID, str]] = None
+    requires_human: bool = False
 
 
 @dataclass
@@ -239,6 +240,15 @@ class HiveMakeClient:
             "priority": str(request.priority),
             "message": request.message,
         }
+        if not isinstance(request.requires_human, bool):
+            raise ValueError("requires_human must be a boolean")
+        if request.requires_human:
+            # Older schemas ignore unknown fields: fail closed instead of
+            # accidentally releasing a human-only ticket to an autonomous agent.
+            health = self._request("GET", "/api/health", expect=200)
+            if "human_ticket_creation" not in health.get("capabilities", []):
+                raise HiveMakeConfigError("Server does not support human ticket creation; no ticket was filed")
+            body["requires_human"] = True
         if request.not_before is not None:
             validate_not_before(request.not_before)
             # Older request schemas silently ignore unknown fields. Never send
