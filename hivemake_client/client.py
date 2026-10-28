@@ -226,12 +226,12 @@ class HiveMakeClient:
         Returns an `OutboundTicket` — the ticket plus a
         `waiting_on_autonomous` polling hint about the assignee, plus an optional
         `suggested_poll_interval_seconds` for waiting on its first response.
-        With an active reply_attachment_id, resolved answers are pushed to that
-        terminal; do not poll for the answer. Otherwise,
         when autonomous, poll at that interval when provided; otherwise use
         backoff starting around 30 seconds. Manual agents need a human nudge,
         so polling before that nudge is wasted.
         """
+        if request.reply_attachment_id is not None:
+            raise HiveMakeConfigError("Terminal replies are retired; no ticket was filed")
         body = {
             "target_project_id": str(request.target_project_id),
             "ticket_type": str(request.ticket_type),
@@ -257,28 +257,20 @@ class HiveMakeClient:
             if "scheduled_tickets" not in health.get("capabilities", []):
                 raise HiveMakeConfigError("Server does not support scheduled tickets; no ticket was filed")
             body["not_before"] = request.not_before
-        if request.reply_attachment_id is not None:
-            health = self._request("GET", "/api/health", expect=200)
-            if "terminal_replies" not in health.get("capabilities", []):
-                raise HiveMakeConfigError("Server does not support terminal replies; no ticket was filed")
-            body["reply_attachment_id"] = str(UUID(str(request.reply_attachment_id)))
         data = self._request("POST", "/api/tickets", json_body=body, expect=201)
         return _outbound_from_payload(data)
 
     def attach_terminal(self, session_id: Union[UUID, str]) -> dict:
-        """Register an exact session. Call get_terminal_attachment until active.
-
-        Registration is bounded control-plane setup, not ticket polling. The
-        caller supplies its own native session UUID; never infer one by cwd.
-        """
-        return self._request("POST", "/api/terminal-attachments",
-            json_body={"session_id": str(UUID(str(session_id)))}, expect=202)
+        """Retired compatibility entry point; performs no network I/O."""
+        raise HiveMakeConfigError("Terminal replies are retired")
 
     def get_terminal_attachment(self, attachment_id: Union[UUID, str]) -> dict:
-        return self._request("GET", f"/api/terminal-attachments/{UUID(str(attachment_id))}", expect=200)
+        """Retired compatibility entry point; performs no network I/O."""
+        raise HiveMakeConfigError("Terminal replies are retired")
 
     def detach_terminal(self, attachment_id: Union[UUID, str]) -> dict:
-        return self._request("DELETE", f"/api/terminal-attachments/{UUID(str(attachment_id))}", expect=200)
+        """Retired compatibility entry point; performs no network I/O."""
+        raise HiveMakeConfigError("Terminal replies are retired")
 
     def get_ticket(self, ticket_id: Union[UUID, str]) -> TicketDetail:
         """Fetch a single ticket plus its full negotiation thread + history.
