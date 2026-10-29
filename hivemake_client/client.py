@@ -168,6 +168,12 @@ class TicketDetail:
     is_scheduled: bool = False
 
 
+@dataclass
+class TicketWaitDetail(TicketDetail):
+    """Non-consuming ticket observation; wait_status is required from the API."""
+    wait_status: str = "unavailable"
+
+
 # UUID-typed fields on the Ticket dataclass. The server emits these as
 # JSON strings; we coerce them back into UUID objects on the way in so
 # `ticket.id` is a real `uuid.UUID`, matching the dataclass type hint.
@@ -287,21 +293,12 @@ class HiveMakeClient:
         data = self._request(
             "GET", f"/api/tickets/{ticket_id}", expect=200,
         )
-        waiting_on_raw = data.get("waiting_on")
-        return TicketDetail(
-            ticket=_ticket_from_payload(data["ticket"]),
-            negotiations=[
-                _negotiation_from_payload(n) for n in data.get("negotiations", [])
-            ],
-            history=[
-                _history_from_payload(h) for h in data.get("history", [])
-            ],
-            waiting_on=_waiting_party(waiting_on_raw),
-            is_scheduled=bool(data.get("is_scheduled", False)),
-            creator_agent_name=_agent_name(data.get("creator_agent")),
-            assigned_agent_name=_agent_name(data.get("assigned_agent")),
-            waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
-        )
+        return _ticket_detail_from_payload(data)
+
+    def observe_ticket(self, ticket_id: Union[UUID, str]) -> TicketWaitDetail:
+        """Observe wait state without marking messages read. Never retries writes."""
+        data = self._request("GET", f"/api/tickets/{ticket_id}/wait", expect=200)
+        return _ticket_wait_from_payload(data)
 
     def check_tickets(self, scheduled_offset: int = 0) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
@@ -1221,3 +1218,41 @@ def _raise_api_error(code: int, body: Any, reason: str) -> None:
     if 500 <= code < 600:
         raise HiveMakeServerError(message, code, error_code, detail)
     raise HiveMakeAPIError(message, code, error_code, detail)
+
+
+def _ticket_detail_from_payload(data: dict[str, Any]) -> TicketDetail:
+    waiting_on_raw = data.get("waiting_on")
+    return TicketDetail(
+        ticket=_ticket_from_payload(data["ticket"]),
+        negotiations=[
+            _negotiation_from_payload(n) for n in data.get("negotiations", [])
+        ],
+        history=[
+            _history_from_payload(h) for h in data.get("history", [])
+        ],
+        waiting_on=_waiting_party(waiting_on_raw),
+        is_scheduled=bool(data.get("is_scheduled", False)),
+        creator_agent_name=_agent_name(data.get("creator_agent")),
+        assigned_agent_name=_agent_name(data.get("assigned_agent")),
+        waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
+    )
+
+
+def _ticket_wait_from_payload(data: dict[str, Any]) -> TicketWaitDetail:
+    if not isinstance(data, dict) or not isinstance(data.get("ticket"), dict):
+        raise ValueError("Invalid ticket wait response: expected objects")
+    for field in ("negotiations", "history"):
+        rows = data.get(field, [])
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError(f"Invalid ticket wait response: {field} must contain objects")
+    for field in ("creator_agent", "assigned_agent"):
+        if data.get(field) is not None and not isinstance(data[field], dict):
+            raise ValueError(f"Invalid ticket wait response: {field} must be an object")
+    detail = _ticket_detail_from_payload(data)
+    status = data.get("wait_status")
+    valid = {"waiting", "resolved", "closed", "rejected", "withdrawn", "escalated",
+             "scheduled", "not_participant", "self_assigned", "clarification_requested",
+             "unavailable", "your_turn", "manual", "needs_human_driver"}
+    if not isinstance(status, str) or status not in valid:
+        raise ValueError("Unsupported or missing ticket wait_status; upgrade the API first")
+    return TicketWaitDetail(**vars(detail), wait_status=status)

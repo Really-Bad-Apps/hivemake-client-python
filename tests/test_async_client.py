@@ -25,6 +25,7 @@ CASES = [
     ('learning_history', (TICKET_ID,), {'before_revision': 3, 'limit': 2}, dict(revisions=[])),
     ('file_ticket', (FileTicketRequest(PROJECT_ID, 'task', 'Title', 'Description'),), {}, OUTBOUND),
     ('get_ticket', (TICKET_ID,), {}, dict(ticket=TICKET, negotiations=[], history=[], waiting_on='assignee')),
+    ('observe_ticket', (TICKET_ID,), {}, dict(ticket=TICKET, negotiations=[], history=[], waiting_on='assignee', wait_status='waiting')),
     ('check_tickets', (), {'scheduled_offset': 15}, dict(inbox=[TICKET], scheduled=[TICKET], count=2)),
     ('list_inbox', (), {'status': 'open', 'include_terminal': True, 'q': 'title'}, dict(tickets=[TICKET])),
     ('list_outbox', (), {'q': 'title'}, dict(tickets=[OUTBOUND])),

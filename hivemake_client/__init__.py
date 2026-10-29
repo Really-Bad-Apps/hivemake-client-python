@@ -8,6 +8,7 @@ from hivemake_client.client import (
     HiveMakeClient,
     RegistrationResult,
     TicketDetail,
+    TicketWaitDetail,
 )
 from hivemake_client.exceptions import (
     HiveMakeAPIError,
@@ -41,6 +42,7 @@ __all__ = [
     "FileTicketRequest",
     "RegistrationResult",
     "TicketDetail",
+    "TicketWaitDetail",
     "HiveMakeError",
     "HiveMakeConfigError",
     "HiveMakeAPIError",

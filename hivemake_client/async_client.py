@@ -33,9 +33,22 @@ from hivemake_models import (
 )
 
 from hivemake_client.client import (
-    DEFAULT_BASE_URL, DEFAULT_TIMEOUT, RECALL_TIMEOUT,
-    FileTicketRequest, RegistrationResult, TicketDetail, _raise_api_error,
-    _agent_from_payload, _agent_match_from_payload, _agent_name, _history_from_payload, _knowledge_match_from_payload, _negotiation_from_payload, _outbound_from_payload, _ticket_from_payload, _usage_report_from_payload, _waiting_party,
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT,
+    RECALL_TIMEOUT,
+    FileTicketRequest,
+    RegistrationResult,
+    TicketDetail,
+    TicketWaitDetail,
+    _agent_from_payload,
+    _agent_match_from_payload,
+    _knowledge_match_from_payload,
+    _outbound_from_payload,
+    _raise_api_error,
+    _ticket_detail_from_payload,
+    _ticket_from_payload,
+    _ticket_wait_from_payload,
+    _usage_report_from_payload,
 )
 from hivemake_client.exceptions import HiveMakeConfigError, HiveMakeNotFound
 
@@ -195,21 +208,12 @@ class AsyncHiveMakeClient:
         data = await self._request(
             "GET", f"/api/tickets/{ticket_id}", expect=200,
         )
-        waiting_on_raw = data.get("waiting_on")
-        return TicketDetail(
-            ticket=_ticket_from_payload(data["ticket"]),
-            negotiations=[
-                _negotiation_from_payload(n) for n in data.get("negotiations", [])
-            ],
-            history=[
-                _history_from_payload(h) for h in data.get("history", [])
-            ],
-            waiting_on=_waiting_party(waiting_on_raw),
-            is_scheduled=bool(data.get("is_scheduled", False)),
-            creator_agent_name=_agent_name(data.get("creator_agent")),
-            assigned_agent_name=_agent_name(data.get("assigned_agent")),
-            waiting_on_last_seen_seconds=data.get("waiting_on_last_seen_seconds"),
-        )
+        return _ticket_detail_from_payload(data)
+
+    async def observe_ticket(self, ticket_id: Union[UUID, str]) -> TicketWaitDetail:
+        """Read one wait observation without marking messages read."""
+        data = await self._request("GET", f"/api/tickets/{ticket_id}/wait", expect=200)
+        return _ticket_wait_from_payload(data)
 
     async def check_tickets(self, scheduled_offset: int = 0) -> CheckTicketsResult:
         """Everything wanting this agent's attention, in one call.
