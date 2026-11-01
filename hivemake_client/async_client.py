@@ -120,7 +120,8 @@ class AsyncHiveMakeClient:
         request = httpx.Request(
             method, f"{self.base_url}{path}", json=json_body, params=params,
             headers={"Authorization": f"Bearer {self.api_key}",
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json",
+                     "X-HiveMake-Capabilities": "manual-handling"},
             extensions={"timeout": httpx.Timeout(budget, pool=self.pool_timeout).as_dict()},
         )
         # No automatic redirects or retries, especially for ticket writes.
@@ -331,6 +332,7 @@ class AsyncHiveMakeClient:
                     title=row["title"],
                     status=TicketStatus(row["status"]),
                     bucket=row["bucket"],
+                    manual_handling_required=bool(row.get("manual_handling_required", False)),
                 )
                 for row in data.get("digest", [])
             ],

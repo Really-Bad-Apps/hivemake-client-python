@@ -1963,3 +1963,18 @@ class TestAdminUsage:
 
         assert len(report.owners) == 1
         assert report.owners[0].owner_email == "a@b.com"
+
+
+@pytest.mark.parametrize('manual', [None, False, True])
+@responses.activate
+def test_manual_deferral_indicator_survives_client_parsing(client, manual) -> None:
+    ticket_id = uuid4()
+    record = _ticket_payload(ticket_id=ticket_id)
+    if manual is not None:
+        record['manual_handling_required'] = manual
+    responses.get(f'{BASE}/api/tickets/{ticket_id}', json={
+        'ticket': record, 'negotiations': [], 'history': [], 'waiting_on': 'assignee',
+    })
+    result = client.get_ticket(ticket_id)
+    assert result.ticket.manual_handling_required is (manual is True)
+    assert responses.calls[-1].request.headers["X-HiveMake-Capabilities"] == "manual-handling"

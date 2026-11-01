@@ -212,6 +212,7 @@ class HiveMakeClient:
         self._session.headers.update({
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "X-HiveMake-Capabilities": "manual-handling",
         })
 
     # ---------------------------------------------------------------
@@ -416,6 +417,7 @@ class HiveMakeClient:
                     title=row["title"],
                     status=TicketStatus(row["status"]),
                     bucket=row["bucket"],
+                    manual_handling_required=bool(row.get("manual_handling_required", False)),
                 )
                 for row in data.get("digest", [])
             ],

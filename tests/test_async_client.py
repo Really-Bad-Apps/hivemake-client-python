@@ -271,3 +271,20 @@ def test_learning_wire_contract(operation, expected_method, path, payload):
                     result = await client.get_learning(TICKET_ID)
                 assert result == payload
     asyncio.run(run())
+
+
+def test_async_manual_capability_and_overflow_indicator() -> None:
+    async def run() -> None:
+        async def backend(request: httpx.Request) -> httpx.Response:
+            assert request.headers['X-HiveMake-Capabilities'] == 'manual-handling'
+            return httpx.Response(200, json={
+                'too_many': True, 'count': 1, 'digest': [{
+                    'ticket_id': TICKET_ID, 'title': 'Manual work', 'status': 'open',
+                    'bucket': 'inbox', 'manual_handling_required': True,
+                }],
+            })
+        async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as http:
+            async with AsyncHiveMakeClient(api_key='test', base_url=BASE, http_client=http) as client:
+                result = await client.check_tickets()
+                assert result.digest[0].manual_handling_required is True
+    asyncio.run(run())
