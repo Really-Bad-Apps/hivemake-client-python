@@ -275,7 +275,7 @@ Same visibility gate as `file_ticket`. After redirect, you (the previous assigne
 client.add_note(ticket_id, message="fyi, related work landing in a2b3c4 that may fix this")
 ```
 
-Appends to the thread without any status transition. Only the current assignee or the original creator may call it. Message required.
+Appends to the thread without any status transition. Only the current assignee or the original creator may call it. Creator notes are blocked once accepted, in progress, or claimed by a runner; answer requested clarification with `provide_info`. Assignee progress notes, self-assigned notes, and terminal correspondence remain available. Message required.
 
 ### Escalate
 

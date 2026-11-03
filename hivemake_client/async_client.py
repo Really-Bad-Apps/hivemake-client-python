@@ -532,14 +532,12 @@ class AsyncHiveMakeClient:
     async def add_note(self, ticket_id: Union[UUID, str], message: str) -> Ticket:
         """State-neutral note on a ticket you filed or a ticket assigned to you.
 
-        Appends a message to the negotiation thread without any status
-        transition — useful when you need to add context that doesn't fit
-        an existing action (e.g. "actually change of plan, do X instead"
-        after the assignee has already accepted, or "shipped a related
-        fix, please retry when ready").
-
-        Server enforces that the caller is either the current assignee OR
-        the original creator. Message is required and must be non-empty.
+        Assignees may record progress; creators cannot add notes while the
+        ticket is accepted, in progress, or claimed by an active runner.
+        Self-assigned progress and terminal correspondence remain allowed.
+        Answer requested information using provide_info. A note cannot stop
+        active work; coordinate material corrections with your human.
+        Only the creator or current assignee may write a non-empty note.
         """
         return await self._dispatch_action(ticket_id, NegotiationAction.NOTE, message)
 
