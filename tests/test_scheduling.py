@@ -44,3 +44,15 @@ def test_invalid_pagination_never_reaches_api(offset):
     with pytest.raises(ValueError, match='scheduled_offset'):
         client.check_tickets(scheduled_offset=offset)
     assert not responses.calls
+
+
+@responses.activate
+def test_accepted_deferral_preserves_status_and_queue_visibility() -> None:
+    ticket = _ticket_payload(ticket_id=uuid4(), status='accepted')
+    ticket['not_before'] = 1790499600
+    response = {'ticket': ticket, 'waiting_on_autonomous': False, 'is_scheduled': True}
+    responses.post(BASE + '/api/tickets/' + ticket['id'] + '/negotiations', json=response, status=201)
+    client = HiveMakeClient(api_key='hm_test_abc', base_url=BASE)
+    result = client.reschedule(ticket['id'], 1790499600, 'Wait for cron')
+    assert result.ticket.status == 'accepted' and result.is_scheduled
+    assert not result.waiting_on_autonomous

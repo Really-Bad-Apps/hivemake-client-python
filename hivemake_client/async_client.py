@@ -269,7 +269,7 @@ class AsyncHiveMakeClient:
         sessions an agent forgets it escalated something, gets a clean
         "nothing for you", and the work sits.
 
-        scheduled_offset pages only the creator's scheduled backlog; it
+        scheduled_offset pages the caller's created or assigned scheduled work; it
         never hides or filters the other buckets.
 
         Returns `CheckTicketsResult`. On overflow, `too_many=True` and all
@@ -462,7 +462,10 @@ class AsyncHiveMakeClient:
 
     async def reschedule(self, ticket_id: Union[UUID, str], not_before: Optional[int],
                    message: str = "") -> OutboundTicket:
-        """Creator-only update while scheduled. UTC epoch seconds; null releases now."""
+        """Defer/resume open or accepted work; assignee, or creator while open.
+
+        UTC epoch seconds; null/past releases now. Pending questions/escalations
+        and in-flight runner submissions must finish first. Manual holds persist."""
         validate_not_before(not_before)
         data = await self._request("POST", f"/api/tickets/{ticket_id}/negotiations",
                              json_body={"action": "rescheduled", "not_before": not_before,
